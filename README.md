@@ -37,7 +37,7 @@ are unchanged, so the same Python model server answers all three.
 ## Layout
 
 ```
-src/            the Loment implementation (~2.6k lines)
+src/            the Loment implementation (~3.6k lines)
   fuai_byte      byte/string/number helpers
   fuai_sys       raw x86-64 Linux syscalls (no libc)
   fuai_state     the single state block and its layout
