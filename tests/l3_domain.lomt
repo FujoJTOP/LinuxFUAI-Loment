@@ -1,0 +1,64 @@
+// l3_domain.lomt — blast-radius domains: create/bind/info/revoke.
+// Port of LinuxFUAI tests/l3_domain.c.
+
+module l3_domain
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    t_reset(s);
+    let neg1: i64 = 0 as i64 - 1;
+
+    let info: ptr = alloc(200);
+    cap_grant(s, 6, ALL_ACTS);
+
+    dom_info(s, info);
+    t_check(s, b_ld64(info, 0) == 0 && b_ld64(info, 16) == 1,
+            "domain 0 granted", b_ld64(info, 16), 1);
+
+    let d: i64 = dom_create(s, 0, 1, 0);
+    t_check(s, d >= 1 && d < 5, "domain created", d as u64, 1);
+    dom_bind(s, d as u64);
+    let di: u32 = d as u32;
+
+    let rc: i64 = cap_exec(s, ACT_SET_CFG, 1, 42);
+    t_check(s, rc == neg1, "bounded cfg deny", rc as u64, neg1 as u64);
+
+    dom_adjust(s, d as u64, 8);
+    dom_info(s, info);
+    t_check(s, b_ld64(info, di * 40 + 8) == 8, "domain perm adjusted",
+            b_ld64(info, di * 40 + 8), 8);
+    let rc2: i64 = cap_exec(s, ACT_SET_CFG, 1, 42);
+    t_check(s, rc2 == 0, "widened cfg ok", rc2 as u64, 0);
+
+    dom_revoke(s, d as u64);
+    let rc3: i64 = cap_exec(s, ACT_SET_CFG, 1, 43);
+    t_check(s, rc3 == neg1, "revoked deny", rc3 as u64, neg1 as u64);
+    dom_info(s, info);
+    t_check(s, b_ld64(info, di * 40 + 16) == 0, "revoked granted=0",
+            b_ld64(info, di * 40 + 16), 0);
+
+    dom_bind(s, 0);
+    let rc4: i64 = cap_exec(s, ACT_SET_CFG, 2, 1);
+    t_check(s, rc4 == 0, "system domain ok", rc4 as u64, 0);
+
+    let buf: ptr = alloc(96 * 32);
+    let na: i64 = aud_read(s, buf, 96 * 32);
+    let dom_audits: u64 = 0;
+    let i: i64 = 0;
+    while i < na {
+        if b_ld64(buf, (i as u32) * 32 + 8) == 3 {
+            dom_audits = dom_audits + 1;
+        }
+        i = i + 1;
+    }
+    t_check(s, dom_audits >= 3, "domain ops audited", dom_audits, 3);
+
+    fuai_shutdown(s);
+    t_done(s, 3, "l3");
+}

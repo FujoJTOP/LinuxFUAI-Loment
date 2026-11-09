@@ -1,0 +1,759 @@
+// fuai_duty.lomt — five duties, intent classify, quality ledger and the
+// trust-adaptive domain width. Port of LinuxFUAI src/fuai_duties.c.
+
+module fuai_duty
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_ai.lomt"
+use "fuai_core.lomt"
+use "fuai_ctx.lomt"
+use "fuai_rules.lomt"
+use "fuai_chan.lomt"
+use "fuai_log.lomt"
+
+pub const QUAL_DUTY: u32 = 8;
+pub const WIDEN_CONFIRM: u64 = 2;
+pub const QUAL_SEQ_N: u32 = 64;
+
+pub fn evl_mode(s: ptr, mode: u64) -> i64 {
+    let m: u64 = mode;
+    if m > 2 {
+        m = 2;
+    }
+    st_s(s, ST_EVAL_FORCE, m);
+    lg1(s, "evl  : engine mode=", m);
+    return 0;
+}
+
+pub fn eval_force(s: ptr) -> u64 {
+    return st_g(s, ST_EVAL_FORCE);
+}
+
+// ---- quality ledger ----------------------------------------------------------
+
+pub fn qual_feed(s: ptr, duty: u64, hit: u64) -> i64 {
+    if duty == 0 || duty > 8 {
+        return 0 as i64 - 22;
+    }
+    let d: u32 = (duty - 1) as u32;
+    let total: u64 = st_g(s, ST_Q_TOTAL + d);
+    if total < 64 {
+        st_s(s, ST_Q_TOTAL + d, total + 1);
+        if hit != 0 {
+            st_s(s, ST_Q_HIT + d, st_g(s, ST_Q_HIT + d) + 1);
+        }
+    } else {
+        let h: u64 = st_g(s, ST_Q_HIT + d);
+        let bit: u64 = hit % 2;
+        st_s(s, ST_Q_HIT + d, (h * 63 + bit * 64) / 64);
+    }
+    let qi: u64 = st_g(s, ST_QUAL_SEQ_I);
+    let qbuf: ptr = st_qual(s);
+    b_st64(qbuf, ((qi % 64) * 8) as u32, hit % 2);
+    st_s(s, ST_QUAL_SEQ_I, qi + 1);
+    return 0;
+}
+
+pub fn qual_note(s: ptr, duty: u64, hit: u64) {
+    qual_feed(s, duty, hit);
+}
+
+fn qual_rate(s: ptr, d: u32) -> u64 {
+    let total: u64 = st_g(s, ST_Q_TOTAL + d);
+    if total == 0 {
+        return 50;
+    }
+    return st_g(s, ST_Q_HIT + d) * 100 / total;
+}
+
+pub fn qual_seq(s: ptr, out: ptr, n: u64) -> i64 {
+    let m: u64 = n;
+    if m > 64 {
+        m = 64;
+    }
+    let qi: u64 = st_g(s, ST_QUAL_SEQ_I);
+    let qbuf: ptr = st_qual(s);
+    let k: u64 = 0;
+    while k < m {
+        let idx: u64 = (qi + k) % 64;
+        b_st64(out, (k * 8) as u32, b_ld64(qbuf, (idx * 8) as u32));
+        k = k + 1;
+    }
+    b_st64(out, (m * 8) as u32, qi);
+    return m as i64;
+}
+
+// 0x8313: domain width = f(measured quality). out = {rate, code, perm&0xFF}.
+pub fn dom_admit(s: ptr, duty: u64, out: ptr) -> i64 {
+    if duty == 0 || duty > 8 {
+        return 0 as i64 - 22;
+    }
+    let d: u32 = (duty - 1) as u32;
+    let q: u64 = qual_rate(s, d);
+    let th: u64 = cfg_get(s, 7) as u64;
+    let t_high: u64 = 1;
+    if th > 0 {
+        t_high = th;
+    }
+    let tl: u64 = cfg_get(s, 8) as u64;
+    let t_low: u64 = 0;
+    if tl > 0 {
+        t_low = tl;
+    }
+    let cur: u64 = current_domain(s);
+    let code: u64 = 0;
+    let perm: u64 = 0;
+    if q >= t_high {
+        st_s(s, ST_Q_UP + d, st_g(s, ST_Q_UP + d) + 1);
+    } else {
+        st_s(s, ST_Q_UP + d, 0);
+    }
+    let up: u64 = st_g(s, ST_Q_UP + d);
+    if up >= 2 {
+        if cur >= 1 && cur < 5 {
+            dom_adjust(s, cur, ALL_ACTS);
+            code = 1;
+            let info: ptr = st_payload(s);
+            dom_info(s, info);
+            perm = b_ld64(info, (cur * 40 + 8) as u32);
+        }
+    } else {
+        if q < t_low && t_low > 0 {
+            if cur >= 1 && cur < 5 {
+                dom_adjust(s, cur, 32);
+                code = 2;
+                let info2: ptr = st_payload(s);
+                dom_info(s, info2);
+                perm = b_ld64(info2, (cur * 40 + 8) as u32);
+            }
+        }
+    }
+    b_st64(out, 0, q);
+    b_st64(out, 8, code);
+    b_st64(out, 16, perm % 256);
+    lg2(s, "admit: duty=", duty, " rate=", q, "");
+    return code as i64;
+}
+
+pub fn ai_stats(s: ptr, out: ptr) {
+    b_st64(out, 0, chan_ai_calls(s));
+    b_st64(out, 8, rulebook_n(s) as u64);
+    b_st64(out, 16, rulebook_hits(s));
+    b_st64(out, 24, ai_pos(s));
+}
+
+// ---- duty 0: intent classify -------------------------------------------------
+
+pub fn classify(s: ptr, text: ptr, tlen: u32) -> i64 {
+    let len: u32 = tlen;
+    if len > 64 {
+        len = 64;
+    }
+    b_lower_copy(text, len, st_lower(s), 64);
+    let lower: ptr = st_lower(s);
+    let o: ptr = st_payload(s);
+    if eval_force(s) != 1 {
+        if rules_match(s, lower, len, 1, o) == 1 {
+            let v: u64 = b_ld64(o, 0);
+            ai_note(s, 1, 3, v, 0, 0, 0, text, len);
+            lg1(s, "ai   : classify engine=rulebook -> ", v);
+            return v as i64;
+        }
+    }
+    if eval_force(s) != 2 {
+        let seq: u64 = chan_send_req(s, 1, lower, len);
+        let line: ptr = st_line(s);
+        let ln: u32 = chan_wait_rsp(s, seq, line, 128);
+        if ln > 0 && chan_r3_discarded(s) == 0 {
+            let ip: ptr = st_stat(s);
+            if b_parse_num_field(line, ln, "INTENT=", ip) == 1 {
+                let v: u64 = b_ld64(ip, 0);
+                let iv: u64 = v;
+                if iv > 4 {
+                    iv = 4;
+                }
+                ai_note(s, 1, 1, iv, 0, 0, 0, text, len);
+                return iv as i64;
+            }
+        }
+    }
+    let intent: i64 = rl_classify(s, lower, len);
+    ai_note(s, 1, 2, intent as u64, 0, 0, 0, text, len);
+    lgs(s, "ai   : classify engine=rules-fallback");
+    return intent;
+}
+
+// ---- sentinel ----------------------------------------------------------------
+
+fn d_parse_pid(t: ptr, len: u32) -> u64 {
+    let i: u32 = 0;
+    while i + 4 <= len {
+        if load8(t, i) == 112 && load8(t, i + 1) == 105 &&
+           load8(t, i + 2) == 100 && load8(t, i + 3) == 61 {
+            let v: u64 = 0;
+            let saw: u32 = 0;
+            let j: u32 = i + 4;
+            while j < len && load8(t, j) >= 48 && load8(t, j) <= 57 {
+                v = v * 10 + (load8(t, j) - 48) as u64;
+                j = j + 1;
+                saw = 1;
+            }
+            if saw == 1 {
+                return v;
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+pub fn anom_run(s: ptr, digest: ptr, dlen: u32, out: ptr) -> i64 {
+    let len: u32 = dlen;
+    if len > 400 {
+        len = 400;
+    }
+    let anom: u64 = 0;
+    let conf: u64 = 0;
+    let engine: u64 = 0;
+    let tag: ptr = st_tag(s);
+    store8(tag, 0, 0 as u8);
+    let o: ptr = st_payload(s);
+    if eval_force(s) != 1 && rules_match(s, digest, len, 2, o) == 1 {
+        anom = b_ld64(o, 0);
+        conf = b_ld64(o, 8);
+        engine = 3;
+        b_strcpy(tag, str_ptr("rulebook"));
+    } else {
+        if eval_force(s) == 2 {
+            rl_anom(s, digest, len, o);
+            anom = b_ld64(o, 0);
+            conf = b_ld64(o, 8);
+            engine = 2;
+            b_strcpy(tag, str_ptr("fjrules"));
+        } else {
+            let seq: u64 = chan_send_req(s, 2, digest, len);
+            let line: ptr = st_line(s);
+            let ln: u32 = chan_wait_rsp(s, seq, line, 128);
+            let pa: ptr = st_stat(s);
+            let pc: ptr = st_idbuf(s);
+            let ok: u32 = 0;
+            if ln > 0 && chan_r3_discarded(s) == 0 &&
+               b_parse_num_field(line, ln, "ANOM=", pa) == 1 &&
+               b_parse_num_field(line, ln, "CONF=", pc) == 1 {
+                anom = b_ld64(pa, 0);
+                if anom > 1 {
+                    anom = 1;
+                }
+                conf = b_ld64(pc, 0);
+                if conf > 100 {
+                    conf = 100;
+                }
+                engine = 1;
+                b_parse_seg_field(line, ln, "TAG=", tag, 24);
+                ok = 1;
+            }
+            if ok == 0 {
+                lgs(s, "anom : shm timeout -> rules fallback");
+                rl_anom(s, digest, len, o);
+                anom = b_ld64(o, 0);
+                conf = b_ld64(o, 8);
+                engine = 2;
+                b_strcpy(tag, str_ptr("fjrules"));
+            }
+        }
+    }
+    let iso_rc: i64 = 0;
+    let verified: u64 = 0;
+    if anom == 1 {
+        st_s(s, ST_ANOM_TOTAL, st_g(s, ST_ANOM_TOTAL) + 1);
+        st_s(s, ST_ANOM_PENDING, st_g(s, ST_ANOM_PENDING) + 1);
+        let pid: u64 = d_parse_pid(digest, len);
+        ev_push(s, 5, pid, anom, conf, ev_ticks(s));
+        if cfg_get(s, 2) == 1 && conf >= (cfg_get(s, 1) as u64) && pid != 0 {
+            iso_rc = cap_exec(s, ACT_ISOLATE, pid, 0);
+            if iso_rc == 0 && task_state(s, pid) == TASK_STOPPED {
+                verified = 1;
+            }
+        }
+    }
+    ai_note(s, 2, engine, anom, conf, iso_rc as u64, verified, digest, len);
+    qual_note(s, 2, verified);
+    b_st64(out, 0, anom);
+    b_st64(out, 8, conf);
+    b_st64(out, 16, engine);
+    lg2(s, "anom : engine=", engine, " conf=", conf, "");
+    return 0;
+}
+
+// ---- planner -----------------------------------------------------------------
+
+fn verify_action(s: ptr, act: u64, a0: u64, a1: u64) -> u32 {
+    if act == ACT_KILL {
+        if task_state(s, a0) == TASK_DEAD {
+            return 1;
+        }
+    } else {
+        if act == ACT_ISOLATE {
+            if task_state(s, a0) == TASK_STOPPED {
+                return 1;
+            }
+        } else {
+            if act == ACT_RESUME {
+                if task_state(s, a0) == TASK_RUNNING {
+                    return 1;
+                }
+            } else {
+                if act == ACT_SET_CFG {
+                    if (cfg_get(s, a0) as u64) == a1 {
+                        return 1;
+                    }
+                } else {
+                    if act == ACT_ACK {
+                        if anom_pending(s) == 0 {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// Parse "A<act> <a0>[ <a1>]" into out[0..2].
+fn parse_action(tok: ptr, tlen: u32, out: ptr) {
+    b_st64(out, 0, 0);
+    b_st64(out, 8, 0);
+    b_st64(out, 16, 0);
+    let i: u32 = 0;
+    if i < tlen && load8(tok, i) == 65 {
+        i = i + 1;
+    }
+    let act: u64 = 0;
+    while i < tlen && load8(tok, i) >= 48 && load8(tok, i) <= 57 {
+        act = act * 10 + (load8(tok, i) - 48) as u64;
+        i = i + 1;
+    }
+    while i < tlen && load8(tok, i) == 32 {
+        i = i + 1;
+    }
+    let a0: u64 = 0;
+    while i < tlen && load8(tok, i) >= 48 && load8(tok, i) <= 57 {
+        a0 = a0 * 10 + (load8(tok, i) - 48) as u64;
+        i = i + 1;
+    }
+    while i < tlen && load8(tok, i) == 32 {
+        i = i + 1;
+    }
+    let a1: u64 = 0;
+    while i < tlen && load8(tok, i) >= 48 && load8(tok, i) <= 57 {
+        a1 = a1 * 10 + (load8(tok, i) - 48) as u64;
+        i = i + 1;
+    }
+    b_st64(out, 0, act);
+    b_st64(out, 8, a0);
+    b_st64(out, 16, a1);
+}
+
+pub fn plan_run(s: ptr, goal: ptr, glen: u32, out: ptr) -> i64 {
+    let len: u32 = glen;
+    if len > 200 {
+        len = 200;
+    }
+    let plan: ptr = st_plan(s);
+    let plen: u32 = 0;
+    let engine: u64 = 0;
+    let o: ptr = st_payload(s);
+    if eval_force(s) != 1 && rules_match(s, goal, len, 3, o) == 1 {
+        let v: u64 = b_ld64(o, 0);
+        let a0: u64 = b_ld64(o, 8);
+        let a1: u64 = b_ld64(o, 16);
+        let p: u32 = 0;
+        p = b_push_lit(plan, 256, p, "A");
+        p = b_push_dec(plan, 256, p, v, st_dec(s));
+        p = b_push_lit(plan, 256, p, " ");
+        p = b_push_dec(plan, 256, p, a0, st_dec(s));
+        if a1 != 0 {
+            p = b_push_lit(plan, 256, p, " ");
+            p = b_push_dec(plan, 256, p, a1, st_dec(s));
+        }
+        store8(plan, p, 0 as u8);
+        plen = p;
+        engine = 3;
+    } else {
+        if eval_force(s) == 2 {
+            plen = rl_plan(s, goal, len, plan, 256);
+            engine = 2;
+        } else {
+            let seq: u64 = chan_send_req(s, 3, goal, len);
+            let line: ptr = st_line(s);
+            let ln: u32 = chan_wait_rsp(s, seq, line, 128);
+            if ln > 0 && chan_r3_discarded(s) == 0 {
+                engine = 1;
+                plen = b_parse_seg_field(line, ln, "PLAN=", plan, 256);
+            }
+            if plen == 0 {
+                if engine == 0 {
+                    engine = 2;
+                }
+                plen = rl_plan(s, goal, len, plan, 256);
+            }
+        }
+    }
+    let n_ok: u64 = 0;
+    let n_fail: u64 = 0;
+    let n_ver: u64 = 0;
+    let start: u32 = 0;
+    let i: u32 = 0;
+    while i <= plen {
+        let end: u32 = 0;
+        if i == plen {
+            end = 1;
+        } else {
+            if load8(plan, i) == 59 {
+                end = 1;
+            }
+        }
+        if end == 1 {
+            if i > start {
+                let act_o: ptr = st_tag(s);
+                parse_action(ptr_add(plan, start), i - start, act_o);
+                let act: u64 = b_ld64(act_o, 0);
+                let a0: u64 = b_ld64(act_o, 8);
+                let a1: u64 = b_ld64(act_o, 16);
+                if act >= 1 && act <= 6 {
+                    let rc: i64 = cap_exec(s, act, a0, a1);
+                    if rc == 0 {
+                        n_ok = n_ok + 1;
+                        n_ver = n_ver + verify_action(s, act, a0, a1) as u64;
+                    } else {
+                        n_fail = n_fail + 1;
+                    }
+                } else {
+                    n_fail = n_fail + 1;
+                }
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    b_st64(out, 0, n_ok);
+    b_st64(out, 8, n_fail);
+    let all_ok: u64 = 0;
+    if n_fail == 0 {
+        all_ok = 1;
+    }
+    b_st64(out, 16, all_ok);
+    ai_note(s, 3, engine, n_ok, n_fail, all_ok, n_ver, goal, len);
+    let qh: u64 = 0;
+    if n_ver > 0 {
+        qh = 1;
+    }
+    qual_note(s, 3, qh);
+    lg2(s, "plan: ok=", n_ok, " fail=", n_fail, "");
+    return 0;
+}
+
+// ---- IO predictor ------------------------------------------------------------
+
+pub fn io_predict(s: ptr, seq: ptr, slen: u32, out: ptr) -> i64 {
+    let len: u32 = slen;
+    if len > 64 {
+        len = 64;
+    }
+    let next: u64 = 0;
+    let engine: u64 = 0;
+    let o: ptr = st_payload(s);
+    if eval_force(s) != 1 && rules_match(s, seq, len, 4, o) == 1 {
+        next = b_ld64(o, 0);
+        engine = 3;
+    } else {
+        if eval_force(s) == 2 {
+            let mv: u64 = io_markov(s, seq, len);
+            if mv != 0 {
+                next = mv;
+                engine = 4;
+            } else {
+                next = io_last_num(seq, len);
+                engine = 2;
+            }
+        } else {
+            let mv: u64 = io_markov(s, seq, len);
+            if mv != 0 {
+                next = mv;
+                engine = 4;
+            } else {
+                let sq: u64 = chan_send_req(s, 4, seq, len);
+                let line: ptr = st_line(s);
+                let ln: u32 = chan_wait_rsp(s, sq, line, 128);
+                let nx: ptr = st_stat(s);
+                if ln > 0 && chan_r3_discarded(s) == 0 &&
+                   b_parse_num_field(line, ln, "NEXT=", nx) == 1 {
+                    next = b_ld64(nx, 0);
+                    engine = 1;
+                } else {
+                    next = io_last_num(seq, len);
+                    engine = 2;
+                }
+            }
+        }
+    }
+    let hit: u64 = 0;
+    if st_g(s, ST_PREV_VALID) == 0 {
+        hit = 2;
+    } else {
+        if st_g(s, ST_PREV_IO) == next {
+            hit = 1;
+        }
+    }
+    st_s(s, ST_PREV_IO, next);
+    st_s(s, ST_PREV_VALID, 1);
+    ai_note(s, 4, engine, next, hit, 0, 0, seq, len);
+    qual_note(s, 4, hit % 2);
+    b_st64(out, 0, next);
+    lg2(s, "io   : next=", next, " engine=", engine, "");
+    return 0;
+}
+
+// ---- NLC ---------------------------------------------------------------------
+
+pub fn nlc_set(s: ptr, text: ptr, tlen: u32, out: ptr) -> i64 {
+    let len: u32 = tlen;
+    if len > 200 {
+        len = 200;
+    }
+    let pol: ptr = st_pol(s);
+    let plen: u32 = 0;
+    let engine: u64 = 0;
+    let o: ptr = st_payload(s);
+    if eval_force(s) != 1 && rules_match(s, text, len, 5, o) == 1 {
+        let v: u64 = b_ld64(o, 0);
+        let a0: u64 = b_ld64(o, 8);
+        let p: u32 = 0;
+        p = b_push_lit(pol, 256, p, "POL=");
+        p = b_push_dec(pol, 256, p, v, st_dec(s));
+        p = b_push_lit(pol, 256, p, ":");
+        p = b_push_dec(pol, 256, p, a0, st_dec(s));
+        p = b_push_lit(pol, 256, p, ";");
+        store8(pol, p, 0 as u8);
+        plen = p;
+        engine = 3;
+    } else {
+        if eval_force(s) == 2 {
+            plen = rl_nlc(s, text, len, pol, 256);
+            engine = 2;
+        } else {
+            let sq: u64 = chan_send_req(s, 5, text, len);
+            let line: ptr = st_line(s);
+            let ln: u32 = chan_wait_rsp(s, sq, line, 128);
+            if ln > 0 && chan_r3_discarded(s) == 0 {
+                engine = 1;
+                plen = b_parse_seg_field(line, ln, "POL=", pol, 256);
+            }
+            let empty: u32 = 1;
+            let k: u32 = 0;
+            while k < plen {
+                if load8(pol, k) != 0 {
+                    empty = 0;
+                }
+                k = k + 1;
+            }
+            if plen == 0 || empty == 1 {
+                if engine == 0 {
+                    engine = 2;
+                }
+                plen = rl_nlc(s, text, len, pol, 256);
+            }
+        }
+    }
+    let applied: u64 = 0;
+    let verified: u64 = 0;
+    let i: u32 = 0;
+    while i + 4 <= plen {
+        if load8(pol, i) == 80 && load8(pol, i + 1) == 79 &&
+           load8(pol, i + 2) == 76 && load8(pol, i + 3) == 61 {
+            i = i + 4;
+            let k: u64 = 0;
+            let kk: u32 = 0;
+            while i < plen && load8(pol, i) >= 48 && load8(pol, i) <= 57 {
+                k = k * 10 + (load8(pol, i) - 48) as u64;
+                i = i + 1;
+                kk = 1;
+            }
+            if kk == 0 {
+                i = i + 1;
+            } else {
+                if i < plen && load8(pol, i) == 58 {
+                    i = i + 1;
+                }
+                let val: u64 = 0;
+                let vs: u32 = 0;
+                while i < plen && load8(pol, i) >= 48 && load8(pol, i) <= 57 {
+                    val = val * 10 + (load8(pol, i) - 48) as u64;
+                    i = i + 1;
+                    vs = 1;
+                }
+                let csrc: i64 = cfg_set(s, k, val);
+                if vs == 1 && k >= 1 && k <= 8 && csrc == 0 {
+                    applied = applied + 1;
+                    let back: i64 = cfg_get(s, k);
+                    if (back as u64) == val {
+                        verified = verified + 1;
+                    }
+                }
+            }
+        } else {
+            i = i + 1;
+        }
+    }
+    ai_note(s, 5, engine, applied, verified, 0, verified, text, len);
+    let qh: u64 = 0;
+    if verified > 0 {
+        qh = 1;
+    }
+    qual_note(s, 5, qh);
+    b_st64(out, 0, applied);
+    lg2(s, "nlc : applied=", applied, " verified=", verified, "");
+    return 0;
+}
+
+// ---- environment scan --------------------------------------------------------
+
+fn env_cpus(s: ptr) -> u64 {
+    let mask: ptr = st_ctxb(s);
+    b_zero(mask, 128);
+    let rc: i64 = sy_affinity(mask, 128);
+    if rc <= 0 {
+        return 1;
+    }
+    let n: u64 = 0;
+    let i: u32 = 0;
+    while i < 128 {
+        let b: u32 = load8(mask, i);
+        let bit: u32 = 0;
+        while bit < 8 {
+            if (b >> bit) % 2 == 1 {
+                n = n + 1;
+            }
+            bit = bit + 1;
+        }
+        i = i + 1;
+    }
+    if n == 0 {
+        n = 1;
+    }
+    return n;
+}
+
+fn env_memmb(s: ptr) -> u64 {
+    let buf: ptr = st_buf(s);
+    let n: i64 = sy_read_file(str_ptr("/proc/meminfo"), buf, 512);
+    if n <= 0 {
+        return 0;
+    }
+    let pos: i64 = b_find_sub(buf, n as u32, str_ptr("MemTotal:"), 9);
+    if pos < 0 {
+        return 0;
+    }
+    let j: u32 = (pos as u32) + 9;
+    while j < (n as u32) && (load8(buf, j) == 32 || load8(buf, j) == 9) {
+        j = j + 1;
+    }
+    let v: u64 = 0;
+    while j < (n as u32) && load8(buf, j) >= 48 && load8(buf, j) <= 57 {
+        v = v * 10 + (load8(buf, j) - 48) as u64;
+        j = j + 1;
+    }
+    return v / 1024;
+}
+
+fn env_digest(s: ptr) -> u32 {
+    let out: ptr = st_digest(s);
+    let un: ptr = st_ctxb(s);
+    sy_uname(un);
+    let kern: ptr = ptr_add(un, 130);
+    let cpus: u64 = env_cpus(s);
+    let memmb: u64 = env_memmb(s);
+    let p: u32 = 0;
+    p = b_push_lit(out, 256, p, "linux cpus=");
+    p = b_push_dec(out, 256, p, cpus, st_dec(s));
+    p = b_push_lit(out, 256, p, " memmb=");
+    p = b_push_dec(out, 256, p, memmb, st_dec(s));
+    p = b_push_lit(out, 256, p, " kern=");
+    p = b_push_bytes(out, 256, p, kern, b_strlen(kern));
+    store8(out, p, 0 as u8);
+    return p;
+}
+
+fn scene_code(s: ptr, len: u32) -> u64 {
+    if len >= 7 && b_eq(s, str_ptr("desktop"), 7) {
+        return 1;
+    }
+    if len >= 8 && b_eq(s, str_ptr("headless"), 8) {
+        return 2;
+    }
+    if len >= 6 && b_eq(s, str_ptr("server"), 6) {
+        return 3;
+    }
+    if len >= 5 && b_eq(s, str_ptr("games"), 5) {
+        return 4;
+    }
+    return 0;
+}
+
+pub fn env_scan(s: ptr, out: ptr) -> i64 {
+    let digest: ptr = st_digest(s);
+    let d: u32 = env_digest(s);
+    let scene: ptr = st_scene(s);
+    store8(scene, 0, 0 as u8);
+    let scene_len: u32 = 0;
+    let profile: u64 = 2;
+    let engine: u64 = 0;
+    if eval_force(s) == 2 {
+        engine = 2;
+        b_strcpy(scene, str_ptr("desktop"));
+        scene_len = 7;
+        profile = 2;
+    } else {
+        let sq: u64 = chan_send_req(s, 6, digest, d);
+        let line: ptr = st_line(s);
+        let ln: u32 = chan_wait_rsp(s, sq, line, 128);
+        if ln > 0 && chan_r3_discarded(s) == 0 {
+            engine = 1;
+            scene_len = b_parse_seg_field(line, ln, "SCENE=", scene, 12);
+            let prof: ptr = st_stat(s);
+            if b_parse_num_field(line, ln, "PROFILE=", prof) == 1 {
+                profile = b_ld64(prof, 0);
+                if profile < 1 {
+                    profile = 1;
+                }
+                if profile > 4 {
+                    profile = 4;
+                }
+            }
+        }
+        if scene_len == 0 {
+            engine = 2;
+            b_strcpy(scene, str_ptr("desktop"));
+            scene_len = 7;
+            profile = 2;
+        }
+    }
+    let code: u64 = scene_code(scene, scene_len);
+    cfg_set(s, 6, profile);
+    let tlen: u32 = d;
+    if tlen > 40 {
+        tlen = 40;
+    }
+    ai_note(s, 6, engine, profile, code, 0, 0, digest, tlen);
+    b_st64(out, 0, profile);
+    b_st64(out, 8, code);
+    b_st64(out, 16, d as u64);
+    lg2(s, "env  : profile=", profile, " scene=", code, "");
+    return 0;
+}

@@ -1,0 +1,71 @@
+// l10_trust.lomt — trust-adaptive domains: lagged widen, immediate shrink.
+// Port of LinuxFUAI tests/l10_trust.c.
+
+module l10_trust
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_register(1);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+    cap_grant(s, 6, ALL_ACTS);
+
+    let info: ptr = alloc(200);
+    let o: ptr = alloc(32);
+    let d1: i64 = dom_create(s, 0, 1, 0);
+    dom_bind(s, d1 as u64);
+    dom_info(s, info);
+    let di: u32 = d1 as u32;
+    t_check(s, d1 >= 1 && b_ld64(info, di * 40 + 8) == 0,
+            "T1 domain bound perm=0", b_ld64(info, di * 40 + 8), 0);
+
+    let i: u32 = 0;
+    while i < 12 {
+        qual_feed(s, 4, 1);
+        i = i + 1;
+    }
+    let rc1: i64 = dom_admit(s, 4, o);
+    dom_info(s, info);
+    t_check(s, rc1 == 0 && b_ld64(o, 0) >= 46 && b_ld64(info, di * 40 + 8) == 0,
+            "T2a admit#1 lagged (hold)", rc1 as u64, 0);
+    let rc2: i64 = dom_admit(s, 4, o);
+    dom_info(s, info);
+    t_check(s, rc2 == 1 && b_ld64(info, di * 40 + 8) == 127,
+            "T2b admit#2 widened 0x7F", b_ld64(info, di * 40 + 8), 127);
+
+    let tid: i64 = cap_exec(s, ACT_LAUNCH, 1, 0);
+    let rc3: i64 = cap_exec(s, ACT_KILL, tid as u64, 0);
+    t_check(s, rc3 == 0, "T3 widened kill ok", rc3 as u64, 0);
+
+    let j: u32 = 0;
+    while j < 40 {
+        qual_feed(s, 2, 0);
+        j = j + 1;
+    }
+    let rc4: i64 = dom_admit(s, 2, o);
+    dom_info(s, info);
+    t_check(s, rc4 == 2 && b_ld64(o, 0) < 35 && b_ld64(info, di * 40 + 8) == 32,
+            "T4 shrink to ACK-only", b_ld64(info, di * 40 + 8), 32);
+
+    let tid2: i64 = cap_exec(s, ACT_LAUNCH, 1, 0);
+    let rc5: i64 = cap_exec(s, ACT_ISOLATE, tid2 as u64, 0);
+    let neg1: i64 = 0 as i64 - 1;
+    t_check(s, rc5 == neg1, "T5 shrunk isolate denied", rc5 as u64, neg1 as u64);
+
+    dom_bind(s, 0);
+    cap_exec(s, ACT_KILL, tid2 as u64, 0);
+    dom_revoke(s, d1 as u64);
+
+    let seq: ptr = alloc(65 * 8);
+    let n: i64 = qual_seq(s, seq, 64);
+    t_check(s, n == 64, "qual_seq 64 slots", n as u64, 64);
+
+    fuai_shutdown(s);
+    t_done(s, 10, "l10");
+}

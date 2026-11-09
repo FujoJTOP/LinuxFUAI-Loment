@@ -1,0 +1,126 @@
+// fuai_payload.lomt — the payload registry and the runner entry.
+//
+// Loment has no function pointers, so a payload is a small integer id whose
+// implementation is the dispatcher below. The public shape is preserved:
+// register an id, spawn it through ACT_LAUNCH, and the re-exec'd child runs
+// the same binary with "--fuai-payload <id>".
+//
+// The writer payload reports EV_FILE / EV_EXIT itself. That is the honest
+// user-space equivalent of the C shim: the C shim interposes libc write/exit,
+// which a freestanding Loment payload never calls. The FIFO, the ring and the
+// supervisor side are identical; only the reporter differs (see README).
+
+module fuai_payload
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+
+pub const PAY_MAX: u32 = 8;
+
+pub fn pay_valid(id: u32) -> u32 {
+    if id >= 1 && id <= 2 {
+        return 1;
+    }
+    return 0;
+}
+
+pub fn fuai_payload_register(id: u32) -> i64 {
+    if id >= 1 && id <= 8 {
+        return id as i64;
+    }
+    return 0 as i64 - 17;
+}
+
+// Report one event line to the supervisor over <home>/ev.fifo.
+pub fn pay_ev(s: ptr, kind: u32, a: u64, b: u64) -> u32 {
+    let path: ptr = st_evp(s);
+    if load8(path, 0) == 0 {
+        return 0;
+    }
+    let fd: i64 = sy_open(path, 1 + 2048, 0);
+    if fd < 0 {
+        return 0;
+    }
+    let line: ptr = st_line(s);
+    let p: u32 = 0;
+    p = b_push_lit(line, 512, p, "EV ");
+    p = b_push_dec(line, 512, p, kind as u64, st_dec(s));
+    p = b_push_lit(line, 512, p, " ");
+    p = b_push_dec(line, 512, p, a, st_dec(s));
+    p = b_push_lit(line, 512, p, " ");
+    p = b_push_dec(line, 512, p, b, st_dec(s));
+    store8(line, p, 10 as u8);
+    sy_write(fd, line, (p + 1) as u64);
+    sy_close(fd);
+    return 1;
+}
+
+fn pay_busy(s: ptr) -> u32 {
+    sy_puts(1, "worker: running\n");
+    let x: u64 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        x = x + 1;
+        if x == 0 {
+            going = 1;
+        }
+    }
+    return 0;
+}
+
+fn pay_writer(s: ptr) -> u32 {
+    let fd: i64 = sy_open(str_ptr("/tmp/fuai-eyes-demo.txt"), 577, 420);
+    if fd >= 0 {
+        let msg: str = "fuai eyes demo line\n";
+        let i: u32 = 0;
+        while i < 3 {
+            sy_write(fd, str_ptr(msg), str_len(msg) as u64);
+            pay_ev(s, 2, str_len(msg) as u64, fd as u64);
+            i = i + 1;
+        }
+        sy_close(fd);
+    }
+    pay_ev(s, 4, 0, 0);
+    return 0;
+}
+
+pub fn pay_run(s: ptr, id: u32) -> u32 {
+    if id == 1 {
+        return pay_busy(s);
+    }
+    if id == 2 {
+        return pay_writer(s);
+    }
+    return 0;
+}
+
+// Parse /proc/self/cmdline for "--fuai-payload <id>"; run it and exit.
+pub fn fuai_payload_main(s: ptr) -> u32 {
+    let buf: ptr = st_buf(s);
+    let n: i64 = sy_cmdline(buf, 512);
+    if n <= 0 {
+        return 0;
+    }
+    let pos: i64 = b_find_sub(buf, n as u32, str_ptr("--fuai-payload"), 14);
+    if pos >= 0 {
+        let j: u32 = (pos as u32) + 14;
+        while j < (n as u32) && (load8(buf, j) == 0 || load8(buf, j) == 32) {
+            j = j + 1;
+        }
+        let id: u32 = 0;
+        while j < (n as u32) && load8(buf, j) >= 48 && load8(buf, j) <= 57 {
+            id = id * 10 + (load8(buf, j) - 48);
+            j = j + 1;
+        }
+        if pay_valid(id) == 0 {
+            sy_exit(127);
+        }
+        pay_run(s, id);
+        sy_exit(0);
+    }
+    return 0;
+}

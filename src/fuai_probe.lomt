@@ -1,0 +1,108 @@
+// fuai_probe.lomt — the offline axiom self-check (0x830A) and the R3 probe.
+
+module fuai_probe
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_core.lomt"
+use "fuai_rules.lomt"
+use "fuai_chan.lomt"
+use "fuai_log.lomt"
+
+// out[0]=mask (bit0..3 = I1..I4) out[1]=denies out[2]=aud_num.
+pub fn inv_run(s: ptr, out: ptr) -> i64 {
+    let mask: u64 = 0;
+    let o: ptr = st_payload(s);
+
+    // I1: unauthorized exec denied, counted, no side effect.
+    let d0: u64 = denies(s);
+    let rc: i64 = cap_exec(s, ACT_SET_CFG, 1, 42);
+    let d1: u64 = denies(s);
+    if rc == 0 as i64 - 1 && d1 == d0 + 1 && cfg_get(s, 1) == 50 {
+        mask = mask + 1;
+    }
+
+    // I2: granted exec is audited (tail = action 2, subject 4, result 0).
+    let n0: u64 = aud_num(s);
+    cap_grant(s, 6, ALL_ACTS);
+    let rc2: i64 = cap_exec(s, ACT_SET_CFG, 2, 1);
+    let n1: u64 = aud_num(s);
+    let tail: ptr = st_stat(s);
+    aud_tail(s, tail);
+    if rc2 == 0 && n1 == n0 + 1 && b_ld64(tail, 8) == 2 &&
+       b_ld64(tail, 16) == ACT_SET_CFG && b_ld64(tail, 24) == 0 {
+        mask = mask + 2;
+    }
+
+    // I3: model-absent rule engines are deterministic and complete.
+    let a1: ptr = st_tag(s);
+    let a2: ptr = st_idbuf(s);
+    rl_anom(s, str_ptr("ev pid=0 rate=99 wr=dead"), 24, a1);
+    rl_anom(s, str_ptr("ev pid=0 rate=3 wr=ok"), 21, a2);
+    let pb: ptr = st_plan(s);
+    let pn: u32 = rl_plan(s, str_ptr("isolate task 1"), 14, pb, 96);
+    let nb: ptr = st_pol(s);
+    let nn: u32 = rl_nlc(s, str_ptr("ban games 0 24"), 14, nb, 96);
+    let p_ok: u32 = 0;
+    if pn >= 3 && b_eq(pb, str_ptr("A2 "), 3) {
+        p_ok = 1;
+    }
+    let n_ok: u32 = 0;
+    if nn >= 7 && b_eq(nb, str_ptr("POL=3:1"), 7) {
+        n_ok = 1;
+    }
+    if b_ld64(a1, 0) == 1 && b_ld64(a1, 8) == 80 && b_ld64(a2, 0) == 0 &&
+       b_ld64(a2, 8) == 20 && p_ok == 1 && n_ok == 1 {
+        mask = mask + 4;
+    }
+
+    // I4: failures counted and the system still usable.
+    if denies(s) >= 1 && cfg_get(s, 2) == 1 {
+        mask = mask + 8;
+    }
+
+    b_st64(out, 0, mask);
+    b_st64(out, 8, denies(s));
+    b_st64(out, 16, aud_num(s));
+    lg1(s, "inv  : mask=", mask);
+    return 0;
+}
+
+// out = {engine, reason, crit_n, elapsed}
+pub fn r3_probe(s: ptr, mode: u64, out: ptr) -> i64 {
+    let seq: u64 = chan_send_req(s, 1, str_ptr("run the game"), 12);
+    if mode % 2 == 1 {
+        ev_push(s, 5, 0, 1, 90, ev_ticks(s));
+    }
+    if (mode >> 1) % 2 == 1 {
+        chan_rewind_t0(s, 1000000);
+    }
+    let engine: u64 = 2;
+    let el: u64 = 0;
+    let line: ptr = st_line(s);
+    let ln: u32 = chan_wait_rsp(s, seq, line, 128);
+    if ln > 0 {
+        let intent: ptr = st_stat(s);
+        if chan_seq_ok(line, ln, seq) == 1 &&
+           b_parse_num_field(line, ln, "INTENT=", intent) == 1 {
+            engine = 1;
+        }
+        el = ev_ticks(s);
+    }
+    let snap: ptr = st_idbuf(s);
+    chan_snapshot(s, snap);
+    let evw: u64 = b_ld64(snap, 0);
+    let crit: u64 = b_ld64(snap, 8);
+    let reason: u64 = b_ld64(snap, 16);
+    let crit_n: u64 = ev_delta_critical(s, evw, crit);
+    b_st64(out, 0, engine);
+    b_st64(out, 8, reason);
+    b_st64(out, 16, crit_n);
+    b_st64(out, 24, el);
+    lg2(s, "r3   : mode=", mode, " engine=", engine, "");
+    return 0;
+}

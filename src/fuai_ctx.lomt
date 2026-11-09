@@ -1,0 +1,87 @@
+// fuai_ctx.lomt — structural context text and the event digest.
+
+module fuai_ctx
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_core.lomt"
+
+pub fn ctx_task_count(s: ptr) -> u64 {
+    let n: u64 = 0;
+    let i: u64 = 1;
+    while i < 16 {
+        if task_state(s, i) != TASK_FREE {
+            n = n + 1;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// "fujoctx v2 tasks=K win=0 rate=R anom=A events=N t<id>:<state>..."
+pub fn ctx_struct(s: ptr, out: ptr, cap: u32) -> i64 {
+    let p: u32 = 0;
+    p = b_push_lit(out, cap, p, "fujoctx v2 tasks=");
+    p = b_push_dec(out, cap, p, ctx_task_count(s), st_dec(s));
+    p = b_push_lit(out, cap, p, " win=0 rate=");
+    p = b_push_dec(out, cap, p, st_g(s, ST_SYS_SAMPLE), st_dec(s));
+    p = b_push_lit(out, cap, p, " anom=");
+    p = b_push_dec(out, cap, p, anom_total(s), st_dec(s));
+    p = b_push_lit(out, cap, p, " events=");
+    p = b_push_dec(out, cap, p, st_g(s, ST_EV_W) - st_g(s, ST_EV_C), st_dec(s));
+    let i: u64 = 1;
+    while i < 16 {
+        let st: u64 = task_state(s, i);
+        if st != TASK_FREE {
+            p = b_push_lit(out, cap, p, " t");
+            p = b_push_dec(out, cap, p, i, st_dec(s));
+            p = b_push_lit(out, cap, p, ":");
+            p = b_push_dec(out, cap, p, st, st_dec(s));
+        }
+        i = i + 1;
+    }
+    store8(out, p, 0 as u8);
+    return p as i64;
+}
+
+// "ev pid=N rate=R wr=<kind-name>"
+pub fn ev_digest(s: ptr, out: ptr, cap: u32) -> i64 {
+    let stats: ptr = st_scene(s);
+    ev_stats_recent(s, 100, stats);
+    let rate: u64 = b_ld64(stats, 0);
+    let pid: u64 = b_ld64(stats, 8);
+    let kind: u64 = b_ld64(stats, 16);
+    let name: str = "none";
+    if kind == 1 {
+        name = "syscall";
+    } else {
+        if kind == 2 {
+            name = "file";
+        } else {
+            if kind == 3 {
+                name = "win";
+            } else {
+                if kind == 4 {
+                    name = "exit";
+                } else {
+                    if kind == 5 {
+                        name = "anom";
+                    }
+                }
+            }
+        }
+    }
+    let p: u32 = 0;
+    p = b_push_lit(out, cap, p, "ev pid=");
+    p = b_push_dec(out, cap, p, pid, st_dec(s));
+    p = b_push_lit(out, cap, p, " rate=");
+    p = b_push_dec(out, cap, p, rate, st_dec(s));
+    p = b_push_lit(out, cap, p, " wr=");
+    p = b_push_lit(out, cap, p, name);
+    store8(out, p, 0 as u8);
+    return p as i64;
+}

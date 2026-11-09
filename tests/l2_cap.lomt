@@ -1,0 +1,46 @@
+// l2_cap.lomt — hands deep-check: A1 denial accounting + A2 audit monotonic.
+// Port of LinuxFUAI tests/l2_cap.c.
+
+module l2_cap
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    t_reset(s);
+    let neg1: i64 = 0 as i64 - 1;
+
+    let d0: u64 = denies(s);
+    let rc1: i64 = cap_exec(s, ACT_KILL, 3, 0);
+    t_check(s, rc1 == neg1, "deny kill", rc1 as u64, neg1 as u64);
+    let rc2: i64 = cap_exec(s, ACT_ISOLATE, 3, 0);
+    t_check(s, rc2 == neg1, "deny isolate", rc2 as u64, neg1 as u64);
+    let rc3: i64 = cap_check(s, 2, 1);
+    t_check(s, rc3 == neg1, "deny cap_check", rc3 as u64, neg1 as u64);
+    t_check(s, denies(s) == d0 + 3, "denies counted", denies(s), d0 + 3);
+    t_check(s, cfg_get(s, 1) == 50, "cfg untouched by denials", 50, 50);
+
+    let n0: u64 = aud_num(s);
+    cap_grant(s, 6, ALL_ACTS);
+    let rc4: i64 = cap_exec(s, ACT_SET_CFG, 1, 42);
+    t_check(s, rc4 == 0, "granted exec ok", rc4 as u64, 0);
+    let tail: ptr = alloc(32);
+    aud_tail(s, tail);
+    t_check(s, b_ld64(tail, 8) == 2 && b_ld64(tail, 16) == ACT_SET_CFG &&
+            b_ld64(tail, 24) == 0, "audit tail exec", 0, 0);
+    t_check(s, cfg_get(s, 1) == 42, "cfg applied", 42, 42);
+    t_check(s, aud_num(s) == n0 + 1, "audit +1 per action", aud_num(s), n0 + 1);
+
+    let buf: ptr = alloc(96 * 32);
+    let na: i64 = aud_read(s, buf, 96 * 32);
+    t_check(s, na >= 4, "aud_read entries", na as u64, 4);
+    t_check(s, b_ld64(buf, ((na as u32) - 1) * 32 + 8) == 2,
+            "last entry is exec", 2, 2);
+
+    fuai_shutdown(s);
+    t_done(s, 2, "l2");
+}

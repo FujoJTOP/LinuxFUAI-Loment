@@ -1,0 +1,81 @@
+// l13_model.lomt — online round-trip with the stub model server: all five
+// duties answer through the shm-link channel (engine=1). Port of
+// LinuxFUAI tests/l13_model.c.
+
+module l13_model
+
+choose runtime
+
+use "harness.lomt"
+
+fn last_engine(s: ptr, duty: u64) -> i64 {
+    let aud: ptr = alloc(16 * 88);
+    let n: i64 = ai_export88(s, aud, 16 * 88);
+    let eng: i64 = 0 as i64 - 1;
+    let i: i64 = n - 1;
+    let going: u32 = 1;
+    while i >= 0 && going == 1 {
+        let dt: u64 = b_ld64(aud, (i as u32) * 88 + 8);
+        if dt == duty {
+            eng = b_ld64(aud, (i as u32) * 88) as i64;
+            going = 0;
+        } else {
+            i = i - 1;
+        }
+    }
+    return eng;
+}
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_register(1);
+    fuai_payload_main(s);
+    t_reset(s);
+
+    let out: ptr = alloc(32);
+
+    t_check(s, classify(s, str_ptr("run the game"), 12) == 1,
+            "model classify 1", 1, 1);
+    t_check(s, classify(s, str_ptr("xyzzy"), 5) == 0, "model classify 0", 0, 0);
+    t_check(s, last_engine(s, 1) == 1, "classify engine=1 (model)", 1, 1);
+
+    anom_run(s, str_ptr("ev pid=0 rate=99 wr=dead"), 24, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 8) == 85, "model anom 1/85",
+            b_ld64(out, 0), 1);
+    t_check(s, last_engine(s, 2) == 1, "anom engine=1 (model)", 1, 1);
+
+    cap_grant(s, 6, ALL_ACTS);
+    let tid: i64 = cap_exec(s, ACT_LAUNCH, 1, 0);
+    t_check(s, tid >= 1, "worker launched", tid as u64, 1);
+    let goal: ptr = alloc(128);
+    let p: u32 = 0;
+    p = b_push_lit(goal, 128, p, "isolate task ");
+    p = b_push_dec(goal, 128, p, tid as u64, st_dec(s));
+    p = b_push_lit(goal, 128, p, " then resume it");
+    plan_run(s, goal, p, out);
+    t_check(s, b_ld64(out, 0) == 2 && b_ld64(out, 8) == 0, "model plan executed",
+            b_ld64(out, 0), 2);
+    t_check(s, last_engine(s, 3) == 1, "plan engine=1 (model)", 1, 1);
+    cap_exec(s, ACT_KILL, tid as u64, 0);
+
+    io_predict(s, str_ptr("7 6"), 3, out);
+    t_check(s, b_ld64(out, 0) == 7, "model io next=7", b_ld64(out, 0), 7);
+    t_check(s, last_engine(s, 4) == 1, "io engine=1 (model)", 1, 1);
+
+    nlc_set(s, str_ptr("ban games 9 to 18"), 17, out);
+    t_check(s, b_ld64(out, 0) == 3, "model nlc applied", b_ld64(out, 0), 3);
+    t_check(s, last_engine(s, 5) == 1, "nlc engine=1 (model)", 1, 1);
+
+    env_scan(s, out);
+    t_check(s, b_ld64(out, 0) == 2 && b_ld64(out, 8) == 1,
+            "model env desktop/2", b_ld64(out, 0), 2);
+    t_check(s, last_engine(s, 6) == 1, "env engine=1 (model)", 1, 1);
+
+    r3_probe(s, 0, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 8) == 0, "r3 accept",
+            b_ld64(out, 0), 1);
+
+    fuai_shutdown(s);
+    t_done(s, 13, "l13");
+}

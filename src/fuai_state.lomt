@@ -1,0 +1,162 @@
+// fuai_state.lomt — the one state block and its layout.
+//
+// Loment has no module-level mutable state and no mutable struct references,
+// so the whole supervisor state lives in one block handed back by st_new().
+// Scalar fields occupy fixed 8-byte slots at the front; the big rings and
+// buffers follow at fixed offsets. Every access goes through st_g / st_s.
+
+module fuai_state
+
+choose runtime
+
+use "fuai_byte.lomt"
+
+pub const ST_SIZE: u32 = 40960;
+
+pub const ST_TICK_BASE: u32 = 0;
+pub const ST_DENIES: u32 = 1;
+pub const ST_AUD_POS: u32 = 2;
+pub const ST_AUD_NUM: u32 = 3;
+pub const ST_CUR_DOM: u32 = 4;
+pub const ST_EV_W: u32 = 5;
+pub const ST_EV_C: u32 = 6;
+pub const ST_EV_SUB: u32 = 7;
+pub const ST_SYS_SAMPLE: u32 = 8;
+pub const ST_PUMP_FD: u32 = 9;
+pub const ST_PUMP_ACTIVE: u32 = 10;
+pub const ST_PUMP_TAIL_N: u32 = 11;
+pub const ST_AI_POS: u32 = 12;
+pub const ST_RULE_N: u32 = 13;
+pub const ST_RULE_HITS: u32 = 14;
+pub const ST_IO_N: u32 = 15;
+pub const ST_ANOM_TOTAL: u32 = 16;
+pub const ST_ANOM_PENDING: u32 = 17;
+pub const ST_EVAL_FORCE: u32 = 18;
+pub const ST_PREV_IO: u32 = 19;
+pub const ST_PREV_VALID: u32 = 20;
+pub const ST_AI_CALLS: u32 = 21;
+pub const ST_AI_SEQ: u32 = 22;
+pub const ST_LINK_TMO: u32 = 23;
+pub const ST_SNAP_T0: u32 = 24;
+pub const ST_SNAP_EVW: u32 = 25;
+pub const ST_SNAP_CRIT: u32 = 26;
+pub const ST_SNAP_VALID: u32 = 27;
+pub const ST_SNAP_REASON: u32 = 28;
+pub const ST_RSP_FD: u32 = 29;
+pub const ST_CHAN_OK: u32 = 30;
+pub const ST_HOME_LEN: u32 = 31;
+pub const ST_REQ_LEN: u32 = 32;
+pub const ST_RSP_LEN: u32 = 33;
+pub const ST_FRAME_PATH_LEN: u32 = 34;
+pub const ST_EV_PATH_LEN: u32 = 35;
+pub const ST_ENV_LEN: u32 = 36;
+pub const ST_SELF_LEN: u32 = 37;
+pub const ST_CTX_INIT: u32 = 38;
+pub const ST_PAYLOAD_RUN: u32 = 39;
+pub const ST_QUAL_SEQ_I: u32 = 40;
+
+pub const ST_TASK_DOM: u32 = 41;    // 16 slots
+pub const ST_CAP_PERM: u32 = 57;    // 8 slots
+pub const ST_CAP_GRANT: u32 = 65;   // 8 slots
+pub const ST_CFG_VAL: u32 = 73;     // 8 slots
+pub const ST_CFG_SET: u32 = 81;     // 8 slots
+pub const ST_DOM_PERM: u32 = 89;    // 5 slots (0 = system)
+pub const ST_DOM_GRANT: u32 = 94;   // 5 slots
+pub const ST_DOM_AS: u32 = 99;      // 5 slots
+pub const ST_DOM_IRQ: u32 = 104;    // 5 slots
+pub const ST_TASK_PID: u32 = 109;   // 16 slots
+pub const ST_TASK_STATE: u32 = 125; // 16 slots
+pub const ST_TASK_LIVE: u32 = 141;  // 16 slots
+pub const ST_Q_HIT: u32 = 157;      // 8 slots
+pub const ST_Q_TOTAL: u32 = 165;    // 8 slots
+pub const ST_Q_UP: u32 = 173;       // 8 slots
+pub const ST_FRAME_FD: u32 = 181;
+
+pub const ST_EV_OFF: u32 = 2048;
+pub const ST_AUD_OFF: u32 = 7168;
+pub const ST_AIA_OFF: u32 = 8192;
+pub const ST_RULE_OFF: u32 = 9728;
+pub const ST_QUAL_OFF: u32 = 13824;
+pub const ST_IOST_OFF: u32 = 14592;
+pub const ST_FRAME_OFF: u32 = 14848;
+pub const ST_HOME_OFF: u32 = 18432;
+pub const ST_REQ_OFF: u32 = 18944;
+pub const ST_RSP_OFF: u32 = 19456;
+pub const ST_EVP_OFF: u32 = 19968;
+pub const ST_SCRATCH_OFF: u32 = 20736;
+pub const ST_ENV_OFF: u32 = 24832;
+pub const ST_ARGV_OFF: u32 = 33024;
+pub const ST_CTXB_OFF: u32 = 35072;
+pub const ST_PAYLOAD_OFF: u32 = 36608;
+pub const ST_LINE_OFF: u32 = 37632;
+pub const ST_DIGEST_OFF: u32 = 38144;
+pub const ST_PLAN_OFF: u32 = 38400;
+pub const ST_POL_OFF: u32 = 38656;
+pub const ST_SCENE_OFF: u32 = 38912;
+pub const ST_LOWER_OFF: u32 = 38944;
+pub const ST_TAG_OFF: u32 = 39072;
+pub const ST_TAIL_OFF: u32 = 39104;
+pub const ST_BUF_OFF: u32 = 39360;
+pub const ST_DEC_OFF: u32 = 39872;
+pub const ST_SELF_OFF: u32 = 39936;
+pub const ST_IDBUF_OFF: u32 = 40192;
+pub const ST_EYES_OFF: u32 = 40448;
+pub const ST_STAT_OFF: u32 = 40704;
+
+pub const ST_PATH_CAP: u32 = 512;
+pub const ST_ENV_CAP: u32 = 8192;
+pub const ST_ARGV_CAP: u32 = 2048;
+
+pub fn st_g(s: ptr, slot: u32) -> u64 {
+    return b_ld64(s, slot * 8);
+}
+
+pub fn st_s(s: ptr, slot: u32, v: u64) {
+    b_st64(s, slot * 8, v);
+}
+
+pub fn st_ev(s: ptr) -> ptr { return ptr_add(s, ST_EV_OFF); }
+pub fn st_aud(s: ptr) -> ptr { return ptr_add(s, ST_AUD_OFF); }
+pub fn st_aia(s: ptr) -> ptr { return ptr_add(s, ST_AIA_OFF); }
+pub fn st_rulep(s: ptr) -> ptr { return ptr_add(s, ST_RULE_OFF); }
+pub fn st_qual(s: ptr) -> ptr { return ptr_add(s, ST_QUAL_OFF); }
+pub fn st_iost(s: ptr) -> ptr { return ptr_add(s, ST_IOST_OFF); }
+pub fn st_frame(s: ptr) -> ptr { return ptr_add(s, ST_FRAME_OFF); }
+pub fn st_home(s: ptr) -> ptr { return ptr_add(s, ST_HOME_OFF); }
+pub fn st_req(s: ptr) -> ptr { return ptr_add(s, ST_REQ_OFF); }
+pub fn st_rsp(s: ptr) -> ptr { return ptr_add(s, ST_RSP_OFF); }
+pub fn st_evp(s: ptr) -> ptr { return ptr_add(s, ST_EVP_OFF); }
+pub fn st_scratch(s: ptr) -> ptr { return ptr_add(s, ST_SCRATCH_OFF); }
+pub fn st_env(s: ptr) -> ptr { return ptr_add(s, ST_ENV_OFF); }
+pub fn st_argv(s: ptr) -> ptr { return ptr_add(s, ST_ARGV_OFF); }
+pub fn st_ctxb(s: ptr) -> ptr { return ptr_add(s, ST_CTXB_OFF); }
+pub fn st_payload(s: ptr) -> ptr { return ptr_add(s, ST_PAYLOAD_OFF); }
+pub fn st_line(s: ptr) -> ptr { return ptr_add(s, ST_LINE_OFF); }
+pub fn st_digest(s: ptr) -> ptr { return ptr_add(s, ST_DIGEST_OFF); }
+pub fn st_plan(s: ptr) -> ptr { return ptr_add(s, ST_PLAN_OFF); }
+pub fn st_pol(s: ptr) -> ptr { return ptr_add(s, ST_POL_OFF); }
+pub fn st_scene(s: ptr) -> ptr { return ptr_add(s, ST_SCENE_OFF); }
+pub fn st_lower(s: ptr) -> ptr { return ptr_add(s, ST_LOWER_OFF); }
+pub fn st_tag(s: ptr) -> ptr { return ptr_add(s, ST_TAG_OFF); }
+pub fn st_tail(s: ptr) -> ptr { return ptr_add(s, ST_TAIL_OFF); }
+pub fn st_buf(s: ptr) -> ptr { return ptr_add(s, ST_BUF_OFF); }
+pub fn st_dec(s: ptr) -> ptr { return ptr_add(s, ST_DEC_OFF); }
+pub fn st_self(s: ptr) -> ptr { return ptr_add(s, ST_SELF_OFF); }
+pub fn st_idbuf(s: ptr) -> ptr { return ptr_add(s, ST_IDBUF_OFF); }
+pub fn st_eyes(s: ptr) -> ptr { return ptr_add(s, ST_EYES_OFF); }
+pub fn st_stat(s: ptr) -> ptr { return ptr_add(s, ST_STAT_OFF); }
+
+// One allocation, zeroed, with the sentinels the C version got from statics.
+pub fn st_new() -> ptr {
+    let s: ptr = alloc(ST_SIZE);
+    b_zero(s, ST_SIZE);
+    st_s(s, ST_PUMP_FD, 4294967295);
+    st_s(s, ST_RSP_FD, 4294967295);
+    st_s(s, ST_FRAME_FD, 4294967295);
+    st_s(s, ST_LINK_TMO, 600);
+    st_s(s, ST_EV_SUB, 31);
+    st_s(s, ST_DOM_GRANT, 1);
+    st_s(s, ST_DOM_AS, 3);
+    st_s(s, ST_DOM_IRQ, 1);
+    return s;
+}

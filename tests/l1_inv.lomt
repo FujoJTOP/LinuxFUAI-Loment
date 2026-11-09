@@ -1,0 +1,32 @@
+// l1_inv.lomt — L1: the axiom self-check (A1-A4), fully offline.
+// Port of LinuxFUAI tests/l1_inv.c.
+
+module l1_inv
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_payload_main(s);
+    fuai_init(s, 0 as u64);
+    t_reset(s);
+
+    let out: ptr = alloc(32);
+    inv_run(s, out);
+    t_check(s, b_ld64(out, 0) == 15, "inv mask (A1-A4 all pass)",
+            b_ld64(out, 0), 15);
+
+    let stt: ptr = alloc(32);
+    ai_stats(s, stt);
+    t_check(s, b_ld64(stt, 24) >= 1, "ai audit entries >= 1", b_ld64(stt, 24), 1);
+
+    let ua: ptr = alloc(2048);
+    let n: i64 = unified_aud(s, ua, 2048);
+    t_check(s, n >= 2 && b_ld64(ua, 0) >= 1 && b_ld64(ua, 8) >= 1,
+            "unified audit rings", n as u64, 2);
+
+    fuai_shutdown(s);
+    t_done(s, 1, "l1");
+}

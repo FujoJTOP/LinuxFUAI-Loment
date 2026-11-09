@@ -1,0 +1,65 @@
+// l5_anom.lomt — anomaly sentinel offline: classify, isolate, self-verify, ack.
+// Port of LinuxFUAI tests/l5_anom.c.
+
+module l5_anom
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_register(1);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+    ev_subscribe(s, EV_ANY);
+
+    let out: ptr = alloc(32);
+    let bad: str = "ev pid=0 rate=99 wr=dead";
+    let ok: str = "ev pid=4 rate=7 wr=1";
+
+    anom_run(s, str_ptr(ok), 21, out);
+    t_check(s, b_ld64(out, 0) == 0 && b_ld64(out, 8) == 20 &&
+            b_ld64(out, 16) == 2, "normal 0/20/engine2", b_ld64(out, 0), 0);
+
+    anom_run(s, str_ptr(bad), 24, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 8) == 80 &&
+            b_ld64(out, 16) == 2, "anomaly 1/80/engine2", b_ld64(out, 0), 1);
+    t_check(s, anom_pending(s) == 1, "pending raised", anom_pending(s), 1);
+    t_check(s, anom_total(s) == 1, "total counted", anom_total(s), 1);
+
+    let ev: ptr = alloc(16 * 40);
+    let n: i64 = ev_events(s, ev, 16 * 40);
+    let saw: u32 = 0;
+    let i: i64 = 0;
+    while i < n {
+        if b_ld64(ev, (i as u32) * 40 + 8) == EV_ANOMALY {
+            saw = 1;
+        }
+        i = i + 1;
+    }
+    t_check(s, saw == 1, "EV_ANOMALY in ring", saw as u64, 1);
+
+    cap_grant(s, 6, ALL_ACTS);
+    t_check(s, cap_exec(s, ACT_ACK, 0, 0) == 0, "ack ok", 0, 0);
+    t_check(s, anom_pending(s) == 0, "pending cleared", anom_pending(s), 0);
+
+    cfg_set(s, 2, 1);
+    let tid: i64 = cap_exec(s, ACT_LAUNCH, 1, 0);
+    t_check(s, tid >= 1, "worker launched", tid as u64, 1);
+    let dig: ptr = alloc(128);
+    let p: u32 = 0;
+    p = b_push_lit(dig, 128, p, "ev pid=");
+    p = b_push_dec(dig, 128, p, tid as u64, st_dec(s));
+    p = b_push_lit(dig, 128, p, " rate=99 wr=dead");
+    anom_run(s, dig, p, out);
+    t_check(s, b_ld64(out, 0) == 1, "anomaly detected", b_ld64(out, 0), 1);
+    t_check(s, task_state(s, tid as u64) == TASK_STOPPED,
+            "auto-isolate executed", task_state(s, tid as u64), TASK_STOPPED);
+    cap_exec(s, ACT_KILL, tid as u64, 0);
+
+    fuai_shutdown(s);
+    t_done(s, 5, "l5");
+}

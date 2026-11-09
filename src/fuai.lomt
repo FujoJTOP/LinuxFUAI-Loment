@@ -1,0 +1,49 @@
+// fuai.lomt — public facade: lifecycle wiring and the whole module stack.
+//
+// A test only needs `use "src/fuai.lomt"`; the `use` order below is the
+// dependency order (Loment resolves names top to bottom).
+
+module fuai
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_ai.lomt"
+use "fuai_payload.lomt"
+use "fuai_log.lomt"
+use "fuai_core.lomt"
+use "fuai_ctx.lomt"
+use "fuai_rules.lomt"
+use "fuai_chan.lomt"
+use "fuai_duty.lomt"
+use "fuai_probe.lomt"
+
+pub fn fuai_init(s: ptr, home_addr: u64) -> i64 {
+    core_init(s);
+    chan_init(s, home_addr);
+    ev_ctx_init(s);
+    ai_boot(s);
+    return 0;
+}
+
+pub fn fuai_shutdown(s: ptr) {
+    tasks_reap(s);
+    chan_close(s);
+}
+
+pub fn fuai_ticks(s: ptr) -> u64 {
+    return ev_ticks(s);
+}
+
+pub fn fuai_set_eye_lib(s: ptr, path: ptr) {
+    b_strcpy(st_eyes(s), path);
+}
+
+pub fn fuai_set_link_timeout(s: ptr, ticks: u64) {
+    if ticks > 0 {
+        st_s(s, ST_LINK_TMO, ticks);
+    }
+}

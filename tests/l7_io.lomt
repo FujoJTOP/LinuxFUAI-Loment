@@ -1,0 +1,45 @@
+// l7_io.lomt — IO ownership: the deterministic markov baseline owns periodic
+// flows at zero model calls. Port of LinuxFUAI tests/l7_io.c.
+
+module l7_io
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+
+    let out: ptr = alloc(32);
+    let st: ptr = alloc(32);
+    ai_stats(s, st);
+    let calls0: u64 = b_ld64(st, 0);
+
+    io_predict(s, str_ptr("1 2 3 1 2 3"), 11, out);
+    t_check(s, b_ld64(out, 0) == 1, "markov: 123123 -> 1", b_ld64(out, 0), 1);
+
+    io_predict(s, str_ptr("3 1 2"), 5, out);
+    t_check(s, b_ld64(out, 0) == 3, "markov: 312 -> 3", b_ld64(out, 0), 3);
+
+    io_predict(s, str_ptr("7 6"), 3, out);
+    t_check(s, b_ld64(out, 0) == 6, "fallback: last block", b_ld64(out, 0), 6);
+
+    ai_stats(s, st);
+    t_check(s, b_ld64(st, 0) == calls0 + 1,
+            "baseline owns periodic; novel -> 1 attempt", b_ld64(st, 0),
+            calls0 + 1);
+
+    let a: ptr = alloc(32);
+    let b: ptr = alloc(32);
+    io_predict(s, str_ptr("0 1 2 3 4"), 9, a);
+    io_predict(s, str_ptr("0 1 2 3 4"), 9, b);
+    t_check(s, b_ld64(a, 0) == b_ld64(b, 0), "A3 deterministic",
+            b_ld64(a, 0), b_ld64(b, 0));
+
+    fuai_shutdown(s);
+    t_done(s, 7, "l7");
+}

@@ -1,0 +1,61 @@
+// l4_classify.lomt — intent classify offline: rules then the FJRU rulebook.
+// Port of LinuxFUAI tests/l4_classify.c.
+
+module l4_classify
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+
+    t_check(s, classify(s, str_ptr("run the game"), 12) == 1, "rules: run->1", 1, 1);
+    t_check(s, classify(s, str_ptr("exit now"), 8) == 4, "rules: exit->4", 4, 4);
+    t_check(s, classify(s, str_ptr("open a file"), 11) == 3, "rules: open->3", 3, 3);
+    t_check(s, classify(s, str_ptr("hello there"), 11) == 2, "rules: hello->2", 2, 2);
+    t_check(s, classify(s, str_ptr("xyzzy"), 5) == 0, "rules: unknown->0", 0, 0);
+
+    let a: i64 = classify(s, str_ptr("run the game"), 12);
+    let b: i64 = classify(s, str_ptr("run the game"), 12);
+    t_check(s, a == b, "A3 deterministic", a as u64, b as u64);
+
+    // FJRU v1: magic/ver/count + one entry {"run" -> 1, duty=classify}
+    let rb: ptr = alloc(64);
+    b_zero(rb, 64);
+    store8(rb, 0, 70 as u8);
+    store8(rb, 1, 74 as u8);
+    store8(rb, 2, 82 as u8);
+    store8(rb, 3, 85 as u8);
+    store8(rb, 4, 1 as u8);
+    store8(rb, 8, 1 as u8);
+    store8(rb, 16, 3 as u8);
+    store8(rb, 17, 114 as u8);
+    store8(rb, 18, 117 as u8);
+    store8(rb, 19, 110 as u8);
+    store8(rb, 20, 1 as u8);
+    store8(rb, 23, 95 as u8);
+    store8(rb, 25, 1 as u8);
+    let loaded: i64 = rules_load(s, rb, 26);
+    t_check(s, loaded == 1, "rulebook load", loaded as u64, 1);
+
+    let st0: ptr = alloc(32);
+    ai_stats(s, st0);
+    t_check(s, classify(s, str_ptr("run the game"), 12) == 1,
+            "rulebook: run->1", 1, 1);
+
+    let st: ptr = alloc(32);
+    ai_stats(s, st);
+    t_check(s, b_ld64(st, 0) == b_ld64(st0, 0),
+            "rulebook hit: zero extra model calls", b_ld64(st, 0),
+            b_ld64(st0, 0));
+    t_check(s, b_ld64(st, 8) == 1, "rulebook entries", b_ld64(st, 8), 1);
+    t_check(s, b_ld64(st, 16) >= 1, "rulebook hits", b_ld64(st, 16), 1);
+
+    fuai_shutdown(s);
+    t_done(s, 4, "l4");
+}

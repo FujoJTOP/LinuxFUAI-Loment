@@ -1,0 +1,581 @@
+// fuai_core.lomt — hands, capability slots, audit ring, config, domains,
+// task table and the exec gate. Port of LinuxFUAI src/fuai_core.c.
+//
+// A1 unauthorized act -> -1, no side effect, DENIES++.
+// A2 every call writes exactly one audit entry; aud_num is monotonic.
+// A3 deterministic rule fallbacks live elsewhere; a broken link never blocks.
+// A4 failures are counted (DENIES) and reported (engine field).
+
+module fuai_core
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_ai.lomt"
+use "fuai_payload.lomt"
+use "fuai_log.lomt"
+
+pub const ACT_KILL: u64 = 1;
+pub const ACT_ISOLATE: u64 = 2;
+pub const ACT_LAUNCH: u64 = 3;
+pub const ACT_SET_CFG: u64 = 4;
+pub const ACT_RESUME: u64 = 5;
+pub const ACT_ACK: u64 = 6;
+pub const ACT_BOX_CMD: u64 = 7;
+pub const ALL_ACTS: u64 = 127;
+
+pub const DOM_MAX: u32 = 5;
+pub const TASK_FREE: u64 = 0;
+pub const TASK_RUNNING: u64 = 1;
+pub const TASK_STOPPED: u64 = 2;
+pub const TASK_DEAD: u64 = 3;
+pub const MAX_TASKS: u32 = 16;
+
+pub fn aud_entry(s: ptr, idx: u32) -> ptr {
+    return ptr_add(st_aud(s), idx * 32);
+}
+
+pub fn aud_note(s: ptr, action: u64, subject: u64, result: u64) {
+    let pos: u64 = st_g(s, ST_AUD_POS);
+    let e: ptr = aud_entry(s, (pos % 32) as u32);
+    b_st64(e, 0, ev_ticks(s));
+    b_st64(e, 8, action);
+    b_st64(e, 16, subject);
+    b_st64(e, 24, result);
+    st_s(s, ST_AUD_POS, pos + 1);
+    st_s(s, ST_AUD_NUM, st_g(s, ST_AUD_NUM) + 1);
+}
+
+pub fn aud_log(s: ptr, action: u64, subject: u64) -> i64 {
+    aud_note(s, action, subject, 0);
+    return 0;
+}
+
+pub fn aud_read(s: ptr, out: ptr, cap: u64) -> i64 {
+    let n: u64 = cap / 32;
+    let pos: u64 = st_g(s, ST_AUD_POS);
+    let num: u64 = st_g(s, ST_AUD_NUM);
+    if n > 32 {
+        n = 32;
+    }
+    if n > num {
+        n = num;
+    }
+    let i: u64 = 0;
+    while i < n {
+        let idx: u64 = (pos + 32 - n + i) % 32;
+        let e: ptr = aud_entry(s, idx as u32);
+        b_copy(ptr_add(out, (i * 32) as u32), e, 32);
+        i = i + 1;
+    }
+    return n as i64;
+}
+
+pub fn aud_tail(s: ptr, out: ptr) {
+    let num: u64 = st_g(s, ST_AUD_NUM);
+    if num == 0 {
+        b_st64(out, 0, 0);
+        b_st64(out, 8, 0);
+        b_st64(out, 16, 0);
+        b_st64(out, 24, 0);
+    } else {
+        let pos: u64 = st_g(s, ST_AUD_POS);
+        let e: ptr = aud_entry(s, ((pos - 1) % 32) as u32);
+        b_copy(out, e, 32);
+    }
+}
+
+pub fn denies(s: ptr) -> u64 { return st_g(s, ST_DENIES); }
+pub fn aud_num(s: ptr) -> u64 { return st_g(s, ST_AUD_NUM); }
+
+pub fn cap_grant(s: ptr, idx: u64, perm: u64) -> i64 {
+    if idx >= 8 {
+        return 0 as i64 - 22;
+    }
+    st_s(s, ST_CAP_PERM + idx as u32, perm);
+    st_s(s, ST_CAP_GRANT + idx as u32, 1);
+    return 0;
+}
+
+pub fn cap_check(s: ptr, idx: u64, perm: u64) -> i64 {
+    if idx >= 8 {
+        return 0 as i64 - 22;
+    }
+    let g: u64 = st_g(s, ST_CAP_GRANT + idx as u32);
+    let p: u64 = st_g(s, ST_CAP_PERM + idx as u32);
+    if g == 1 && (p & perm) == perm {
+        return 0;
+    }
+    st_s(s, ST_DENIES, st_g(s, ST_DENIES) + 1);
+    aud_note(s, 1, idx, 1);
+    return 0 as i64 - 1;
+}
+
+pub fn cfg_get(s: ptr, key: u64) -> i64 {
+    if key == 0 || key > 8 {
+        return 0 as i64 - 22;
+    }
+    if st_g(s, ST_CFG_SET + (key - 1) as u32) == 1 {
+        return st_g(s, ST_CFG_VAL + (key - 1) as u32) as i64;
+    }
+    if key == 1 {
+        return 50;
+    }
+    if key == 2 {
+        return 0;
+    }
+    if key == 7 {
+        return 46;
+    }
+    if key == 8 {
+        return 35;
+    }
+    return 0;
+}
+
+pub fn cfg_set(s: ptr, key: u64, val: u64) -> i64 {
+    if key == 0 || key > 8 {
+        return 0 as i64 - 22;
+    }
+    let hi: u64 = 100;
+    if key == 2 {
+        hi = 1;
+    }
+    if val > hi {
+        lg2(s, "cfg  : reject #", key, " = ", val, " (out of value domain)");
+        return 0 as i64 - 22;
+    }
+    if key == 7 {
+        let low: u64 = cfg_get(s, 8) as u64;
+        if val <= low {
+            lgs(s, "cfg  : reject #7 (tau invariant: tau_high <= tau_low)");
+            return 0 as i64 - 22;
+        }
+    }
+    if key == 8 {
+        let high: u64 = cfg_get(s, 7) as u64;
+        if val >= high {
+            lgs(s, "cfg  : reject #8 (tau invariant: tau_low >= tau_high)");
+            return 0 as i64 - 22;
+        }
+    }
+    st_s(s, ST_CFG_VAL + (key - 1) as u32, val);
+    st_s(s, ST_CFG_SET + (key - 1) as u32, 1);
+    return 0;
+}
+
+// ---- domains ----------------------------------------------------------------
+
+pub fn dom_granted(s: ptr, d: u64) -> u32 {
+    if d >= 5 {
+        return 0;
+    }
+    if d == 0 {
+        return st_g(s, ST_CAP_GRANT + 6) as u32;
+    }
+    return st_g(s, ST_DOM_GRANT + d as u32) as u32;
+}
+
+pub fn dom_bits(s: ptr, d: u64) -> u64 {
+    if d >= 5 {
+        return 0;
+    }
+    if d == 0 {
+        return st_g(s, ST_CAP_PERM + 6);
+    }
+    return st_g(s, ST_DOM_PERM + d as u32);
+}
+
+pub fn current_domain(s: ptr) -> u64 {
+    return st_g(s, ST_CUR_DOM);
+}
+
+pub fn dom_create(s: ptr, perm: u64, as_mask: u64, irq: u64) -> i64 {
+    let i: u64 = 1;
+    while i < 5 {
+        if st_g(s, ST_DOM_GRANT + i as u32) == 0 {
+            st_s(s, ST_DOM_PERM + i as u32, perm & ALL_ACTS);
+            st_s(s, ST_DOM_GRANT + i as u32, 1);
+            st_s(s, ST_DOM_AS + i as u32, as_mask & 3);
+            if irq != 0 {
+                st_s(s, ST_DOM_IRQ + i as u32, 1);
+            } else {
+                st_s(s, ST_DOM_IRQ + i as u32, 0);
+            }
+            aud_note(s, 3, i, 0);
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return 0 as i64 - 17;
+}
+
+pub fn dom_revoke(s: ptr, id: u64) -> i64 {
+    if id == 0 || id >= 5 {
+        return 0 as i64 - 22;
+    }
+    st_s(s, ST_DOM_GRANT + id as u32, 0);
+    aud_note(s, 3, id, 1);
+    return 0;
+}
+
+pub fn dom_adjust(s: ptr, id: u64, perm: u64) -> i64 {
+    if id == 0 || id >= 5 {
+        return 0 as i64 - 22;
+    }
+    st_s(s, ST_DOM_PERM + id as u32, perm & ALL_ACTS);
+    if perm != 0 {
+        st_s(s, ST_DOM_GRANT + id as u32, 1);
+    }
+    aud_note(s, 3, id, 2);
+    return 0;
+}
+
+pub fn dom_bind(s: ptr, id: u64) -> i64 {
+    if id >= 5 {
+        return 0 as i64 - 22;
+    }
+    if id != 0 && st_g(s, ST_DOM_GRANT + id as u32) == 0 {
+        return 0 as i64 - 1;
+    }
+    st_s(s, ST_CUR_DOM, id);
+    return 0;
+}
+
+pub fn dom_info(s: ptr, out: ptr) {
+    let i: u64 = 0;
+    while i < 5 {
+        let g: u32 = dom_granted(s, i);
+        b_st64(out, (i * 40) as u32, i);
+        b_st64(out, (i * 40 + 8) as u32, dom_bits(s, i));
+        b_st64(out, (i * 40 + 16) as u32, g as u64);
+        b_st64(out, (i * 40 + 24) as u32, st_g(s, ST_DOM_AS + i as u32));
+        b_st64(out, (i * 40 + 32) as u32, st_g(s, ST_DOM_IRQ + i as u32));
+        i = i + 1;
+    }
+}
+
+fn exec_authorized(s: ptr, act: u64) -> u32 {
+    if act == 0 || act > ACT_BOX_CMD {
+        return 0;
+    }
+    let d: u64 = st_g(s, ST_CUR_DOM);
+    if dom_granted(s, d) == 0 {
+        return 0;
+    }
+    let bit: u64 = act - 1;
+    if (dom_bits(s, d) >> bit) % 2 == 1 {
+        return 1;
+    }
+    return 0;
+}
+
+// ---- anomaly ack state ------------------------------------------------------
+
+pub fn anom_total(s: ptr) -> u64 { return st_g(s, ST_ANOM_TOTAL); }
+pub fn anom_pending(s: ptr) -> u64 { return st_g(s, ST_ANOM_PENDING); }
+
+pub fn anom_ack(s: ptr) -> i64 {
+    st_s(s, ST_ANOM_PENDING, 0);
+    lgs(s, "anom : acknowledged (pending cleared)");
+    return 0;
+}
+
+// ---- tasks ------------------------------------------------------------------
+
+pub fn task_state(s: ptr, id: u64) -> u64 {
+    if id == 0 || id >= 16 || st_g(s, ST_TASK_LIVE + id as u32) == 0 {
+        return TASK_FREE;
+    }
+    let state: u64 = st_g(s, ST_TASK_STATE + id as u32);
+    if state == TASK_RUNNING {
+        let pid: i64 = st_g(s, ST_TASK_PID + id as u32) as i64;
+        let stp: ptr = st_stat(s);
+        b_st32(stp, 0, 0);
+        let r: i64 = sy_wait4(pid, stp, 1 + 2 + 8);
+        if r == pid {
+            let status: u32 = b_ld32(stp, 0);
+            let low: u32 = status % 256;
+            if low == 127 {
+                st_s(s, ST_TASK_STATE + id as u32, TASK_STOPPED);
+            } else {
+                if status == 65535 {
+                    st_s(s, ST_TASK_STATE + id as u32, TASK_RUNNING);
+                } else {
+                    if low == 0 {
+                        st_s(s, ST_TASK_STATE + id as u32, TASK_DEAD);
+                        ev_push(s, 4, id, 0, 0, ev_ticks(s));
+                    } else {
+                        st_s(s, ST_TASK_STATE + id as u32, TASK_DEAD);
+                        ev_push(s, 4, id, 0, 0, ev_ticks(s));
+                    }
+                }
+            }
+        }
+    }
+    return st_g(s, ST_TASK_STATE + id as u32);
+}
+
+fn task_alloc(s: ptr) -> u64 {
+    let i: u64 = 1;
+    while i < 16 {
+        if st_g(s, ST_TASK_LIVE + i as u32) == 0 {
+            return i;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn spawn_env(s: ptr) -> u32 {
+    let env: ptr = st_env(s);
+    let n: u32 = st_g(s, ST_ENV_LEN) as u32;
+    let dp: ptr = st_scratch(s);
+    let cnt: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        let start: u32 = i;
+        while i < n && load8(env, i) != 0 {
+            i = i + 1;
+        }
+        let len: u32 = i - start;
+        if len > 0 {
+            let p: ptr = ptr_add(env, start);
+            let skip: u32 = 0;
+            if len >= 11 && b_eq(p, str_ptr("LD_PRELOAD="), 11) {
+                skip = 1;
+            }
+            if len >= 13 && b_eq(p, str_ptr("FUAI_EV_FIFO="), 13) {
+                skip = 1;
+            }
+            if skip == 0 {
+                b_st64(dp, cnt * 8, p as u64);
+                cnt = cnt + 1;
+            }
+        }
+        i = i + 1;
+    }
+    let eyes: ptr = st_eyes(s);
+    let elen: u32 = b_strlen(eyes);
+    if elen > 0 {
+        let b1: ptr = st_payload(s);
+        let q: u32 = b_push_lit(b1, 480, 0, "LD_PRELOAD=");
+        let q2: u32 = b_push_bytes(b1, 480, q, eyes, elen);
+        store8(b1, q2, 0 as u8);
+        b_st64(dp, cnt * 8, b1 as u64);
+        cnt = cnt + 1;
+    }
+    let b2: ptr = ptr_add(st_payload(s), 512);
+    let evp: ptr = st_evp(s);
+    let q3: u32 = b_push_lit(b2, 480, 0, "FUAI_EV_FIFO=");
+    let q4: u32 = b_push_bytes(b2, 480, q3, evp, b_strlen(evp));
+    store8(b2, q4, 0 as u8);
+    b_st64(dp, cnt * 8, b2 as u64);
+    cnt = cnt + 1;
+    b_st64(dp, cnt * 8, 0);
+    return cnt;
+}
+
+fn spawn_argv(s: ptr, id: u32) -> ptr {
+    let av: ptr = st_argv(s);
+    b_st64(av, 0, st_self(s) as u64);
+    b_st64(av, 8, str_ptr("--fuai-payload") as u64);
+    b_dec_into(st_idbuf(s), 64, id as u64);
+    b_st64(av, 16, st_idbuf(s) as u64);
+    b_st64(av, 24, 0);
+    return av;
+}
+
+pub fn task_spawn(s: ptr, payload_id: u32) -> i64 {
+    if payload_id == 0 || payload_id > 8 {
+        return 0 as i64 - 22;
+    }
+    if pay_valid(payload_id) == 0 {
+        return 0 as i64 - 22;
+    }
+    let tid: u64 = task_alloc(s);
+    if tid == 0 {
+        return 0 as i64 - 11;
+    }
+    spawn_env(s);
+    let av: ptr = spawn_argv(s, payload_id);
+    let dp: ptr = st_scratch(s);
+    let pid: i64 = sy_fork();
+    if pid == 0 {
+        sy_execve(st_self(s), av, dp);
+        sy_exit(127);
+    }
+    if pid < 0 {
+        lgs(s, "task : spawn failed");
+        return 0 as i64 - 1;
+    }
+    st_s(s, ST_TASK_PID + tid as u32, pid as u64);
+    st_s(s, ST_TASK_STATE + tid as u32, TASK_RUNNING);
+    st_s(s, ST_TASK_LIVE + tid as u32, 1);
+    return tid as i64;
+}
+
+pub fn task_bind_domain(s: ptr, task_id: u64, dom_id: u64) -> i64 {
+    if task_id == 0 || task_id >= 16 || dom_id >= 5 {
+        return 0 as i64 - 22;
+    }
+    st_s(s, ST_TASK_DOM + task_id as u32, dom_id);
+    return 0;
+}
+
+fn do_kill(s: ptr, id: u64) -> i64 {
+    if id == 0 || id >= 16 || st_g(s, ST_TASK_LIVE + id as u32) == 0 {
+        return 0 as i64 - 1;
+    }
+    if st_g(s, ST_TASK_STATE + id as u32) == TASK_DEAD {
+        return 0 as i64 - 1;
+    }
+    let pid: i64 = st_g(s, ST_TASK_PID + id as u32) as i64;
+    sy_kill(pid, SYS_SIGKILL);
+    let stp: ptr = st_stat(s);
+    sy_wait4(pid, stp, 0);
+    st_s(s, ST_TASK_STATE + id as u32, TASK_DEAD);
+    ev_push(s, 4, id, 0, 0, ev_ticks(s));
+    return 0;
+}
+
+fn do_isolate(s: ptr, id: u64) -> i64 {
+    if id == 0 || id >= 16 || st_g(s, ST_TASK_LIVE + id as u32) == 0 {
+        return 0 as i64 - 1;
+    }
+    if st_g(s, ST_TASK_STATE + id as u32) == TASK_DEAD {
+        return 0 as i64 - 1;
+    }
+    let pid: i64 = st_g(s, ST_TASK_PID + id as u32) as i64;
+    if sy_kill(pid, SYS_SIGSTOP) != 0 {
+        return 0 as i64 - 1;
+    }
+    st_s(s, ST_TASK_STATE + id as u32, TASK_STOPPED);
+    return 0;
+}
+
+fn do_resume(s: ptr, id: u64) -> i64 {
+    if id == 0 || id >= 16 || st_g(s, ST_TASK_LIVE + id as u32) == 0 {
+        return 0 as i64 - 1;
+    }
+    if st_g(s, ST_TASK_STATE + id as u32) == TASK_DEAD {
+        return 0 as i64 - 1;
+    }
+    let pid: i64 = st_g(s, ST_TASK_PID + id as u32) as i64;
+    if sy_kill(pid, SYS_SIGCONT) != 0 {
+        return 0 as i64 - 1;
+    }
+    st_s(s, ST_TASK_STATE + id as u32, TASK_RUNNING);
+    return 0;
+}
+
+fn aud_exec(s: ptr, act: u64, result: u64) {
+    aud_note(s, 2, act, result);
+    if result == 1 {
+        st_s(s, ST_DENIES, st_g(s, ST_DENIES) + 1);
+    }
+}
+
+pub fn cap_exec(s: ptr, act: u64, a0: u64, a1: u64) -> i64 {
+    if exec_authorized(s, act) == 0 {
+        aud_exec(s, act, 1);
+        lg1(s, "cap  : deny exec #", act);
+        return 0 as i64 - 1;
+    }
+    let rc: i64 = 0;
+    let launch_ok: u64 = 0;
+    if act == ACT_KILL {
+        rc = do_kill(s, a0);
+    } else {
+        if act == ACT_ISOLATE {
+            rc = do_isolate(s, a0);
+        } else {
+            if act == ACT_RESUME {
+                rc = do_resume(s, a0);
+            } else {
+                if act == ACT_SET_CFG {
+                    rc = cfg_set(s, a0, a1);
+                } else {
+                    if act == ACT_ACK {
+                        rc = anom_ack(s);
+                    } else {
+                        if act == ACT_LAUNCH {
+                            rc = task_spawn(s, a0 as u32);
+                            if rc > 0 {
+                                launch_ok = 1;
+                            }
+                        } else {
+                            rc = 0 as i64 - 22;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if rc == 0 {
+        aud_exec(s, act, 0);
+    } else {
+        if launch_ok == 1 {
+            aud_exec(s, act, 0);
+        } else {
+            aud_exec(s, act, 1);
+        }
+    }
+    return rc;
+}
+
+pub fn unified_aud(s: ptr, out: ptr, cap: u64) -> i64 {
+    let cap_n: u64 = (cap - 16) / 32;
+    let num: u64 = st_g(s, ST_AUD_NUM);
+    let pos: u64 = st_g(s, ST_AUD_POS);
+    if cap_n > 32 {
+        cap_n = 32;
+    }
+    if cap_n > num {
+        cap_n = num;
+    }
+    let ai_n: u64 = ai_count(s);
+    b_st64(out, 0, cap_n);
+    b_st64(out, 8, ai_n);
+    let i: u64 = 0;
+    while i < cap_n {
+        let idx: u64 = (pos + 32 - cap_n + i) % 32;
+        b_copy(ptr_add(out, (16 + i * 32) as u32), aud_entry(s, idx as u32), 32);
+        i = i + 1;
+    }
+    let ai_have: i64 = ai_export32(s, ptr_add(out, (16 + cap_n * 32) as u32), ai_n);
+    return (cap_n + ai_have as u64) as i64;
+}
+
+pub fn core_init(s: ptr) -> i64 {
+    ev_set_base(s);
+    let selfn: i64 = sy_self_path(st_self(s), 256);
+    if selfn > 0 {
+        st_s(s, ST_SELF_LEN, selfn as u64);
+    }
+    let en: i64 = sy_env(st_env(s), 8192);
+    if en > 0 {
+        st_s(s, ST_ENV_LEN, en as u64);
+    }
+    return 0;
+}
+
+pub fn tasks_reap(s: ptr) {
+    let i: u64 = 1;
+    while i < 16 {
+        if st_g(s, ST_TASK_LIVE + i as u32) == 1 {
+            if st_g(s, ST_TASK_STATE + i as u32) != TASK_DEAD {
+                let pid: i64 = st_g(s, ST_TASK_PID + i as u32) as i64;
+                sy_kill(pid, SYS_SIGKILL);
+                let stp: ptr = st_stat(s);
+                sy_wait4(pid, stp, 0);
+            }
+            st_s(s, ST_TASK_LIVE + i as u32, 0);
+            st_s(s, ST_TASK_STATE + i as u32, TASK_FREE);
+        }
+        i = i + 1;
+    }
+}

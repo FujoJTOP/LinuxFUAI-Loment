@@ -1,0 +1,90 @@
+// l11b_shim.lomt — optional: the C LD_PRELOAD eye shim against the same pump.
+//
+// Build adapters/libfuaieyes.so and adapters/fuai_eyes_payload (make in
+// adapters/), then set FUAI_EYES_LIB and FUAI_SHIM_PAYLOAD. The child is an
+// unmodified libc binary; write/exit are interposed and reported on the FIFO,
+// and the supervisor drains them into the ring exactly as in l11.
+
+module l11b_shim
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    t_reset(s);
+    ev_subscribe(s, EV_ANY);
+
+    let lib: ptr = alloc(512);
+    let pay: ptr = alloc(512);
+    let have_lib: u32 = chan_env_find(s, "FUAI_EYES_LIB=", lib, 512);
+    let have_pay: u32 = chan_env_find(s, "FUAI_SHIM_PAYLOAD=", pay, 512);
+    t_check(s, have_lib == 1 && have_pay == 1, "adapter paths configured",
+            have_lib as u64, 1);
+    if have_lib == 0 || have_pay == 0 {
+        fuai_shutdown(s);
+        t_done(s, 11, "l11b");
+    }
+
+    let ld: ptr = alloc(600);
+    let p: u32 = 0;
+    p = b_push_lit(ld, 600, p, "LD_PRELOAD=");
+    p = b_push_bytes(ld, 600, p, lib, b_strlen(lib));
+    store8(ld, p, 0 as u8);
+
+    let ev: ptr = alloc(600);
+    let q: u32 = 0;
+    q = b_push_lit(ev, 600, q, "FUAI_EV_FIFO=");
+    q = b_push_bytes(ev, 600, q, st_evp(s), b_strlen(st_evp(s)));
+    store8(ev, q, 0 as u8);
+
+    let ep: ptr = alloc(32);
+    b_st64(ep, 0, ld as u64);
+    b_st64(ep, 8, ev as u64);
+    b_st64(ep, 16, 0);
+    let av: ptr = alloc(16);
+    b_st64(av, 0, pay as u64);
+    b_st64(av, 8, 0);
+
+    let pid: i64 = sy_fork();
+    if pid == 0 {
+        sy_execve(pay, av, ep);
+        sy_exit(127);
+    }
+    t_check(s, pid > 0, "shim payload spawned", pid as u64, 1);
+    let stp: ptr = alloc(8);
+    sy_wait4(pid, stp, 0);
+
+    let i: u32 = 0;
+    while i < 50 {
+        ev_ticks(s);
+        sy_sleep_ms(st_dec(s), 10);
+        i = i + 1;
+    }
+
+    let evb: ptr = alloc(64 * 40);
+    let n: i64 = ev_events(s, evb, 64 * 40);
+    let saw_file: u32 = 0;
+    let saw_exit: u32 = 0;
+    let k: i64 = 0;
+    while k < n {
+        let kind: u64 = b_ld64(evb, (k as u32) * 40 + 8);
+        if kind == EV_FILE {
+            saw_file = 1;
+        }
+        if kind == EV_EXIT {
+            saw_exit = 1;
+        }
+        k = k + 1;
+    }
+    t_check(s, saw_file == 1, "EV_FILE seen (libc write interposed)",
+            saw_file as u64, 1);
+    t_check(s, saw_exit == 1, "EV_EXIT seen (libc exit interposed)",
+            saw_exit as u64, 1);
+
+    fuai_shutdown(s);
+    t_done(s, 11, "l11b");
+}

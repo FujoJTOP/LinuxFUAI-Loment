@@ -1,0 +1,303 @@
+// fuai_rules.lomt — the deterministic rule engines (A3, the final arbiter).
+//
+// Intent classify, anomaly rules, planner rules, NLC policy parsing, the
+// second-order Markov IO baseline, and the FJRU v1 bytecode rulebook. Every
+// function here is deterministic for identical input: model output is a hint,
+// these decide.
+
+module fuai_rules
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_log.lomt"
+
+pub const RULE_MAGIC: u32 = 1431456326;
+pub const RULE_MAX: u32 = 64;
+pub const RULE_NL_MAX: u32 = 40;
+
+// ---- intent classify ---------------------------------------------------------
+
+pub fn rl_classify(s: ptr, lower: ptr, len: u32) -> i64 {
+    if b_has_lit(lower, len, "run") || b_has_lit(lower, len, "exec") {
+        return 1;
+    }
+    if b_has_lit(lower, len, "exit") || b_has_lit(lower, len, "quit") {
+        return 4;
+    }
+    if b_has_lit(lower, len, "open") {
+        return 3;
+    }
+    if b_has_lit(lower, len, "hello") || b_has_lit(lower, len, "info") ||
+       b_has_lit(lower, len, "?") {
+        return 2;
+    }
+    return 0;
+}
+
+// ---- anomaly rules -----------------------------------------------------------
+
+pub fn rl_anom(s: ptr, text: ptr, len: u32, out: ptr) {
+    let anom: u64 = 0;
+    let conf: u64 = 20;
+    if b_has_lit(text, len, "rate=9") || b_has_lit(text, len, "dead") ||
+       b_has_lit(text, len, "diag") {
+        anom = 1;
+        conf = 80;
+    }
+    b_st64(out, 0, anom);
+    b_st64(out, 8, conf);
+}
+
+// ---- planner rules -----------------------------------------------------------
+
+pub fn rl_plan(s: ptr, goal: ptr, len: u32, buf: ptr, buflen: u32) -> u32 {
+    let pid: u64 = b_first_num(goal, len);
+    let pos: u32 = 0;
+    if b_has_lit(goal, len, "isolate") {
+        pos = b_push_lit(buf, buflen, pos, "A2 ");
+        pos = b_push_dec(buf, buflen, pos, pid, st_dec(s));
+        pos = b_push_lit(buf, buflen, pos, ";");
+        if b_has_lit(goal, len, "resume") {
+            pos = b_push_lit(buf, buflen, pos, "A5 ");
+            pos = b_push_dec(buf, buflen, pos, pid, st_dec(s));
+            pos = b_push_lit(buf, buflen, pos, ";");
+        }
+    } else {
+        if b_has_lit(goal, len, "resume") {
+            pos = b_push_lit(buf, buflen, pos, "A5 ");
+            pos = b_push_dec(buf, buflen, pos, pid, st_dec(s));
+            pos = b_push_lit(buf, buflen, pos, ";");
+        } else {
+            if b_has_lit(goal, len, "kill") {
+                pos = b_push_lit(buf, buflen, pos, "A1 ");
+                pos = b_push_dec(buf, buflen, pos, pid, st_dec(s));
+                pos = b_push_lit(buf, buflen, pos, ";");
+            } else {
+                if b_has_lit(goal, len, "threshold") {
+                    pos = b_push_lit(buf, buflen, pos, "A4 1 70;");
+                } else {
+                    pos = b_push_lit(buf, buflen, pos, "A6 0;");
+                }
+            }
+        }
+    }
+    if pos < buflen {
+        store8(buf, pos, 0 as u8);
+    }
+    return pos;
+}
+
+// ---- NLC rules ---------------------------------------------------------------
+
+pub fn rl_nlc(s: ptr, text: ptr, len: u32, buf: ptr, buflen: u32) -> u32 {
+    let pos: u32 = 0;
+    if b_has_lit(text, len, "ban") {
+        let r0: u64 = 0;
+        let r1: u64 = 0;
+        let rn: u32 = 0;
+        let i: u32 = 0;
+        while i < len && rn < 2 {
+            if load8(text, i) >= 48 && load8(text, i) <= 57 {
+                let v: u64 = 0;
+                while i < len && load8(text, i) >= 48 && load8(text, i) <= 57 {
+                    v = v * 10 + (load8(text, i) - 48) as u64;
+                    i = i + 1;
+                }
+                if rn == 0 {
+                    r0 = v;
+                } else {
+                    r1 = v;
+                }
+                rn = rn + 1;
+            } else {
+                i = i + 1;
+            }
+        }
+        pos = b_push_lit(buf, buflen, pos, "POL=3:1;POL=4:");
+        pos = b_push_dec(buf, buflen, pos, r0, st_dec(s));
+        pos = b_push_lit(buf, buflen, pos, ";");
+        if rn >= 2 {
+            pos = b_push_lit(buf, buflen, pos, "POL=5:");
+            pos = b_push_dec(buf, buflen, pos, r1, st_dec(s));
+            pos = b_push_lit(buf, buflen, pos, ";");
+        }
+    } else {
+        pos = b_push_lit(buf, buflen, pos, "POL=6:0;");
+    }
+    if pos < buflen {
+        store8(buf, pos, 0 as u8);
+    }
+    return pos;
+}
+
+// ---- IO baseline -------------------------------------------------------------
+
+pub fn io_last_num(seq: ptr, len: u32) -> u64 {
+    let last: u64 = 0;
+    let i: u32 = 0;
+    while i < len {
+        if load8(seq, i) >= 48 && load8(seq, i) <= 57 {
+            last = (load8(seq, i) - 48) as u64;
+        }
+        i = i + 1;
+    }
+    return last;
+}
+
+pub fn io_markov(s: ptr, seq: ptr, len: u32) -> u64 {
+    let cur: ptr = st_line(s);
+    let cn: u32 = 0;
+    let i: u32 = 0;
+    while i < len && cn < 64 {
+        if load8(seq, i) >= 48 && load8(seq, i) <= 57 {
+            store8(cur, cn, (load8(seq, i) - 48) as u8);
+            cn = cn + 1;
+        }
+        i = i + 1;
+    }
+    if cn < 2 {
+        return 0;
+    }
+    let stream: ptr = st_iost(s);
+    let sn: u32 = st_g(s, ST_IO_N) as u32;
+    if sn + cn > 96 {
+        let from: u32 = 0;
+        if sn > 64 {
+            from = sn - 64;
+        }
+        b_move(stream, ptr_add(stream, from), sn - from);
+        sn = sn - from;
+    }
+    b_copy(ptr_add(stream, sn), cur, cn);
+    sn = sn + cn;
+    st_s(s, ST_IO_N, sn as u64);
+    let a: u32 = load8(cur, cn - 2);
+    let b: u32 = load8(cur, cn - 1);
+    if sn >= 3 {
+        let j: u32 = sn - 3;
+        let going: u32 = 1;
+        while going == 1 {
+            if load8(stream, j) == a && load8(stream, j + 1) == b {
+                return load8(stream, j + 2) as u64;
+            }
+            if j == 0 {
+                going = 0;
+            } else {
+                j = j - 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// ---- FJRU v1 rulebook --------------------------------------------------------
+
+pub fn rule_base(s: ptr) -> ptr { return st_rulep(s); }
+
+pub fn rule_needle(s: ptr, i: u32) -> ptr {
+    return ptr_add(rule_base(s), i * 40);
+}
+
+pub fn rule_meta(s: ptr, field: u32, i: u32) -> ptr {
+    return ptr_add(rule_base(s), 2560 + field * 64 + i);
+}
+
+fn rule_put(s: ptr, field: u32, i: u32, v: u32) {
+    store8(rule_meta(s, field, i), 0, v as u8);
+}
+
+fn rule_get(s: ptr, field: u32, i: u32) -> u32 {
+    return load8(rule_meta(s, field, i), 0);
+}
+
+pub fn rules_load(s: ptr, buf: ptr, len: u32) -> i64 {
+    if len < 16 || len > 8192 {
+        return 0 as i64 - 22;
+    }
+    let magic: u32 = b_ld32(buf, 0);
+    let ver: u32 = b_ld32(buf, 4);
+    let count: u32 = b_ld16(buf, 8);
+    if magic != RULE_MAGIC || ver != 1 {
+        return 0 as i64 - 22;
+    }
+    if count > 64 {
+        count = 64;
+    }
+    let pos: u32 = 16;
+    let n: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 && n < count {
+        if pos + 7 > len {
+            going = 0;
+        } else {
+            let nl: u32 = load8(buf, pos);
+            if nl > 40 {
+                nl = 40;
+            }
+            if nl == 0 || pos + 1 + nl + 6 > len {
+                going = 0;
+            } else {
+                rule_put(s, 1, n, nl);
+                b_copy(rule_needle(s, n), ptr_add(buf, pos + 1), nl);
+                rule_put(s, 2, n, load8(buf, pos + 1 + nl));
+                rule_put(s, 3, n, load8(buf, pos + 2 + nl));
+                rule_put(s, 4, n, load8(buf, pos + 3 + nl));
+                rule_put(s, 5, n, load8(buf, pos + 4 + nl));
+                rule_put(s, 6, n, load8(buf, pos + 5 + nl));
+                rule_put(s, 7, n, load8(buf, pos + 6 + nl));
+                pos = pos + 1 + nl + 6;
+                n = n + 1;
+            }
+        }
+    }
+    st_s(s, ST_RULE_N, n as u64);
+    st_s(s, ST_RULE_HITS, 0);
+    lg1(s, "rules: load ", n as u64);
+    return n as i64;
+}
+
+pub fn rulebook_n(s: ptr) -> u32 {
+    return st_g(s, ST_RULE_N) as u32;
+}
+
+pub fn rulebook_hits(s: ptr) -> u64 {
+    return st_g(s, ST_RULE_HITS);
+}
+
+// out[0]=val out[1]=a0 out[2]=a1 out[3]=conf. Returns 1 on a hit.
+pub fn rules_match(s: ptr, text: ptr, len: u32, duty: u64, out: ptr) -> u32 {
+    let n: u32 = st_g(s, ST_RULE_N) as u32;
+    let i: u32 = 0;
+    while i < n {
+        let d: u32 = rule_get(s, 7, i);
+        if d == 0 || d as u64 == duty {
+            let nl: u32 = rule_get(s, 1, i);
+            if nl > 0 {
+                let pos: i64 = b_find_sub(text, len, rule_needle(s, i), nl);
+                if pos >= 0 {
+                    st_s(s, ST_RULE_HITS, st_g(s, ST_RULE_HITS) + 1);
+                    let v0: u64 = rule_get(s, 3, i) as u64;
+                    if rule_get(s, 6, i) == 1 {
+                        let j: u32 = (pos as u32) + nl;
+                        while j < len && load8(text, j) == 32 {
+                            j = j + 1;
+                        }
+                        if j < len && load8(text, j) >= 48 && load8(text, j) <= 57 {
+                            v0 = b_first_num(ptr_add(text, j), len - j);
+                        }
+                    }
+                    b_st64(out, 0, rule_get(s, 2, i) as u64);
+                    b_st64(out, 8, v0);
+                    b_st64(out, 16, rule_get(s, 4, i) as u64);
+                    b_st64(out, 24, rule_get(s, 5, i) as u64);
+                    return 1;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return 0;
+}

@@ -1,0 +1,64 @@
+// l11_eyes.lomt — the eyes see a real child process. The registered payload
+// is re-exec'd as a separate process, writes a file, and reports EV_FILE /
+// EV_EXIT on <home>/ev.fifo; the supervisor drains it into the event ring.
+//
+// Divergence from LinuxFUAI (documented in README): the C shim interposes
+// libc write/exit; a freestanding Loment payload calls raw syscalls and never
+// enters libc, so the payload reports through the same FIFO itself. The ring,
+// the pump and the supervisor side are identical.
+
+module l11_eyes
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_register(2);
+    fuai_payload_main(s);
+    t_reset(s);
+    cap_grant(s, 6, ALL_ACTS);
+
+    ev_subscribe(s, EV_ANY);
+    let tid: i64 = cap_exec(s, ACT_LAUNCH, 2, 0);
+    t_check(s, tid >= 1, "writer launched", tid as u64, 1);
+
+    let done: u32 = 0;
+    let i: u32 = 0;
+    while i < 100 && done == 0 {
+        if task_state(s, tid as u64) == TASK_DEAD {
+            done = 1;
+        } else {
+            sy_sleep_ms(st_dec(s), 20);
+            ev_ticks(s);
+            i = i + 1;
+        }
+    }
+
+    let ev: ptr = alloc(64 * 40);
+    let n: i64 = ev_events(s, ev, 64 * 40);
+    let saw_file: u32 = 0;
+    let saw_exit: u32 = 0;
+    let k: i64 = 0;
+    while k < n {
+        let kind: u64 = b_ld64(ev, (k as u32) * 40 + 8);
+        if kind == EV_FILE {
+            saw_file = 1;
+        }
+        if kind == EV_EXIT {
+            saw_exit = 1;
+        }
+        k = k + 1;
+    }
+    t_check(s, saw_file == 1, "EV_FILE seen (write reported)", saw_file as u64, 1);
+    t_check(s, saw_exit == 1, "EV_EXIT seen (exit reported)", saw_exit as u64, 1);
+
+    let dig: ptr = alloc(128);
+    ev_digest(s, dig, 128);
+    t_check(s, b_eq(dig, str_ptr("ev pid="), 7), "digest shape", 1, 1);
+
+    fuai_shutdown(s);
+    t_done(s, 11, "l11");
+}

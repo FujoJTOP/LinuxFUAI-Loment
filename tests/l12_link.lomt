@@ -1,0 +1,46 @@
+// l12_link.lomt — model absence is a first-class state (A3): every duty
+// degrades to deterministic rules, calls are counted, the system keeps going.
+// Port of LinuxFUAI tests/l12_link.c.
+
+module l12_link
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+
+    let out: ptr = alloc(32);
+    let st: ptr = alloc(32);
+    ai_stats(s, st);
+    let calls0: u64 = b_ld64(st, 0);
+
+    t_check(s, classify(s, str_ptr("run the game"), 12) == 1,
+            "fallback classify 1", 1, 1);
+    t_check(s, classify(s, str_ptr("exit now"), 8) == 4,
+            "fallback classify 4", 4, 4);
+    t_check(s, chan_r3_discarded(s) == 0, "no stale discard (plain timeout)", 0, 0);
+
+    anom_run(s, str_ptr("ev pid=0 rate=99 wr=dead"), 24, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 16) == 2,
+            "anom rules fallback", b_ld64(out, 0), 1);
+
+    ai_stats(s, st);
+    t_check(s, b_ld64(st, 0) == calls0 + 3, "model calls counted",
+            b_ld64(st, 0), calls0 + 3);
+
+    evl_mode(s, 2);
+    t_check(s, classify(s, str_ptr("open a file"), 11) == 3, "forced rules 3", 3, 3);
+    ai_stats(s, st);
+    t_check(s, b_ld64(st, 0) == calls0 + 3, "forced rules: zero model calls",
+            b_ld64(st, 0), calls0 + 3);
+    evl_mode(s, 0);
+
+    fuai_shutdown(s);
+    t_done(s, 12, "l12");
+}

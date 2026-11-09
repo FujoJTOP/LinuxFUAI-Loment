@@ -1,0 +1,269 @@
+// fuai_ev.lomt — the eyes: 128-slot event ring, tick epoch, eye FIFO pump.
+//
+// Ring slots are {ts, kind, pid, a, b}; the write position is monotonic and a
+// slow consumer drops the oldest entry. Every push takes an explicit `now`
+// so ev_push itself never calls back into the tick function (no recursion).
+
+module fuai_ev
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+
+pub const EV_SYSCALL: u64 = 1;
+pub const EV_FILE: u64 = 2;
+pub const EV_WINDOW: u64 = 3;
+pub const EV_EXIT: u64 = 4;
+pub const EV_ANOMALY: u64 = 5;
+pub const EV_ANY: u64 = 31;
+
+pub const EV_N: u32 = 128;
+pub const EV_SZ: u32 = 40;
+
+pub fn ev_ticks_raw(s: ptr) -> u64 {
+    let ts: ptr = st_dec(s);
+    let ns: u64 = sy_clock_ns(ts);
+    let base: u64 = st_g(s, ST_TICK_BASE);
+    if ns <= base {
+        return 0;
+    }
+    return (ns - base) / 10000000;
+}
+
+pub fn ev_set_base(s: ptr) {
+    let ts: ptr = st_dec(s);
+    st_s(s, ST_TICK_BASE, sy_clock_ns(ts));
+}
+
+pub fn ev_slot(s: ptr, i: u64) -> ptr {
+    let idx: u64 = i % 128;
+    return ptr_add(st_ev(s), (idx * 40) as u32);
+}
+
+pub fn ev_push(s: ptr, kind: u64, pid: u64, a: u64, b: u64, now: u64) {
+    let w: u64 = st_g(s, ST_EV_W);
+    let e: ptr = ev_slot(s, w);
+    b_st64(e, 0, now);
+    b_st64(e, 8, kind % 256);
+    b_st64(e, 16, pid);
+    b_st64(e, 24, a);
+    b_st64(e, 32, b);
+    w = w + 1;
+    st_s(s, ST_EV_W, w);
+    let c: u64 = st_g(s, ST_EV_C);
+    if w - c > 128 {
+        st_s(s, ST_EV_C, w - 128);
+    }
+}
+
+pub fn ev_write_pos(s: ptr) -> u64 {
+    return st_g(s, ST_EV_W);
+}
+
+pub fn ev_subscribe(s: ptr, mask: u64) {
+    st_s(s, ST_EV_SUB, mask);
+    st_s(s, ST_EV_C, st_g(s, ST_EV_W));
+}
+
+pub fn ev_delta_critical(s: ptr, from: u64, crit: u64) -> u64 {
+    let w: u64 = st_g(s, ST_EV_W);
+    if w <= from {
+        return 0;
+    }
+    let n: u64 = 0;
+    let i: u64 = w;
+    let mutlimit: u64 = from;
+    if w - from > 128 {
+        mutlimit = w - 128;
+    }
+    while i > mutlimit {
+        i = i - 1;
+        let k: u64 = b_ld64(ev_slot(s, i), 8);
+        if k >= 1 && k <= 64 {
+            let bit: u64 = (k - 1) % 64;
+            if (crit >> bit) % 2 == 1 {
+                n = n + 1;
+            }
+        }
+    }
+    return n;
+}
+
+// out[0]=rate (cap 99) out[1]=last pid out[2]=last kind, over the last win.
+pub fn ev_stats_recent(s: ptr, win: u64, out: ptr) {
+    let now: u64 = ev_ticks_raw(s);
+    let r: u64 = 0;
+    let last_pid: u64 = 0;
+    let last_kind: u64 = 0;
+    let scanned: u64 = 0;
+    let i: u64 = st_g(s, ST_EV_W);
+    while i > 0 && scanned < 128 {
+        i = i - 1;
+        let e: ptr = ev_slot(s, i);
+        let ts: u64 = b_ld64(e, 0);
+        if now >= ts && now - ts <= win {
+            r = r + 1;
+        }
+        if last_kind == 0 {
+            last_pid = b_ld64(e, 16);
+            last_kind = b_ld64(e, 8);
+        }
+        scanned = scanned + 1;
+    }
+    if r > 99 {
+        r = 99;
+    }
+    b_st64(out, 0, r);
+    b_st64(out, 8, last_pid);
+    b_st64(out, 16, last_kind);
+}
+
+pub fn ev_events(s: ptr, out: ptr, cap: u64) -> i64 {
+    let n: u64 = 0;
+    let c: u64 = st_g(s, ST_EV_C);
+    let w: u64 = st_g(s, ST_EV_W);
+    let sub: u64 = st_g(s, ST_EV_SUB);
+    while c < w {
+        let e: ptr = ev_slot(s, c);
+        let kind: u64 = b_ld64(e, 8);
+        c = c + 1;
+        let bit: u64 = (kind % 64 + 63) % 64;
+        if (sub >> bit) % 2 == 1 {
+            if (n + 1) * 40 > cap {
+                w = c - 1;
+            } else {
+                b_copy(ptr_add(out, (n * 40) as u32), e, 40);
+                n = n + 1;
+            }
+        }
+    }
+    st_s(s, ST_EV_C, c);
+    return n as i64;
+}
+
+// "EV <kind> <a> <b>" from the eye shim or a self-reporting payload.
+fn ev_pump_line(s: ptr, line: ptr, n: u32, now: u64) {
+    let kind: u64 = 0;
+    let a: u64 = 0;
+    let b: u64 = 0;
+    let field: u32 = 0;
+    let i: u32 = 0;
+    while i < n {
+        while i < n && load8(line, i) == 32 {
+            i = i + 1;
+        }
+        let v: u64 = 0;
+        let saw: u32 = 0;
+        while i < n && load8(line, i) >= 48 && load8(line, i) <= 57 {
+            v = v * 10 + (load8(line, i) - 48) as u64;
+            i = i + 1;
+            saw = 1;
+        }
+        if saw == 1 {
+            if field == 0 {
+                kind = v;
+            } else {
+                if field == 1 {
+                    a = v;
+                } else {
+                    if field == 2 {
+                        b = v;
+                    }
+                }
+            }
+            field = field + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    if kind >= 1 && kind <= 5 {
+        ev_push(s, kind, 0, a, b, now);
+    }
+}
+
+pub fn ev_pump(s: ptr) -> u32 {
+    if st_g(s, ST_PUMP_ACTIVE) != 0 {
+        return 0;
+    }
+    let fdv: u64 = st_g(s, ST_PUMP_FD);
+    if fdv == 4294967295 {
+        return 0;
+    }
+    let fd: i64 = fdv as i64;
+    if fd < 0 {
+        return 0;
+    }
+    st_s(s, ST_PUMP_ACTIVE, 1);
+    let now: u64 = ev_ticks_raw(s);
+    let chunk: ptr = st_scratch(s);
+    let line: ptr = st_line(s);
+    let tail: ptr = st_tail(s);
+    let going: u32 = 1;
+    while going == 1 {
+        let r: i64 = sy_read(fd, chunk, 512);
+        if r <= 0 {
+            going = 0;
+        } else {
+            let start: u32 = 0;
+            let i: u32 = 0;
+            let rn: u32 = r as u32;
+            while i < rn {
+                if load8(chunk, i) == 10 {
+                    let n: u32 = 0;
+                    let tn: u32 = st_g(s, ST_PUMP_TAIL_N) as u32;
+                    let k: u32 = 0;
+                    while k < tn && n < 511 {
+                        store8(line, n, load8(tail, k) as u8);
+                        n = n + 1;
+                        k = k + 1;
+                    }
+                    let j: u32 = start;
+                    while j < i && n < 511 {
+                        store8(line, n, load8(chunk, j) as u8);
+                        n = n + 1;
+                        j = j + 1;
+                    }
+                    ev_pump_line(s, line, n, now);
+                    st_s(s, ST_PUMP_TAIL_N, 0);
+                    start = i + 1;
+                }
+                i = i + 1;
+            }
+            let tn2: u32 = 0;
+            let j2: u32 = start;
+            while j2 < rn && tn2 < 255 {
+                store8(tail, tn2, load8(chunk, j2) as u8);
+                tn2 = tn2 + 1;
+                j2 = j2 + 1;
+            }
+            st_s(s, ST_PUMP_TAIL_N, tn2 as u64);
+        }
+    }
+    st_s(s, ST_PUMP_ACTIVE, 0);
+    return 1;
+}
+
+pub fn ev_ticks(s: ptr) -> u64 {
+    ev_pump(s);
+    return ev_ticks_raw(s);
+}
+
+pub fn ev_inject(s: ptr, kind: u64, a: u64, b: u64) {
+    ev_push(s, kind, 0, a, b, ev_ticks(s));
+}
+
+pub fn ev_sys_note(s: ptr, total: u64) {
+    st_s(s, ST_SYS_SAMPLE, total);
+    ev_push(s, 1, 0, total, 0, ev_ticks(s));
+}
+
+pub fn ev_ctx_init(s: ptr) {
+    let path: ptr = st_evp(s);
+    let fd: i64 = sy_open(path, 2 + 2048, 0);
+    if fd >= 0 {
+        st_s(s, ST_PUMP_FD, fd as u64);
+    }
+    st_s(s, ST_CTX_INIT, 1);
+}

@@ -1,0 +1,56 @@
+// l6_plan.lomt — planner closed loop offline: action vector -> cap_exec ->
+// consequence verification. Port of LinuxFUAI tests/l6_plan.c.
+
+module l6_plan
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_register(1);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+    cap_grant(s, 6, ALL_ACTS);
+
+    let tid: i64 = cap_exec(s, ACT_LAUNCH, 1, 0);
+    t_check(s, tid >= 1, "worker launched", tid as u64, 1);
+
+    let out: ptr = alloc(32);
+    let goal: ptr = alloc(128);
+    let p: u32 = 0;
+    p = b_push_lit(goal, 128, p, "isolate task ");
+    p = b_push_dec(goal, 128, p, tid as u64, st_dec(s));
+    p = b_push_lit(goal, 128, p, " then resume it");
+    plan_run(s, goal, p, out);
+    t_check(s, b_ld64(out, 0) == 2 && b_ld64(out, 8) == 0 &&
+            b_ld64(out, 16) == 1, "isolate+resume ok/verified",
+            b_ld64(out, 0), 2);
+    t_check(s, task_state(s, tid as u64) == TASK_RUNNING, "worker resumed",
+            task_state(s, tid as u64), TASK_RUNNING);
+
+    let p2: u32 = 0;
+    p2 = b_push_lit(goal, 128, p2, "kill task ");
+    p2 = b_push_dec(goal, 128, p2, tid as u64, st_dec(s));
+    plan_run(s, goal, p2, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 8) == 0 &&
+            b_ld64(out, 16) == 1, "kill ok/verified", b_ld64(out, 0), 1);
+    t_check(s, task_state(s, tid as u64) == TASK_DEAD, "worker dead",
+            task_state(s, tid as u64), TASK_DEAD);
+
+    plan_run(s, str_ptr("set anomaly threshold to 70"), 27, out);
+    t_check(s, b_ld64(out, 0) == 1 && b_ld64(out, 16) == 1, "threshold ok",
+            b_ld64(out, 0), 1);
+    t_check(s, cfg_get(s, 1) == 70, "cfg1 applied", 70, 70);
+
+    cap_grant(s, 6, 0);
+    plan_run(s, str_ptr("kill task 1"), 11, out);
+    t_check(s, b_ld64(out, 0) == 0 && b_ld64(out, 8) == 1,
+            "unauthorized plan fails", b_ld64(out, 0), 0);
+
+    fuai_shutdown(s);
+    t_done(s, 6, "l6");
+}

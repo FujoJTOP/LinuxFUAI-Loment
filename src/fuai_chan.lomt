@@ -1,0 +1,364 @@
+// fuai_chan.lomt — model channel: shm frame v2 file + FIFO trigger lines.
+//
+// The frame layout is byte-identical to LinuxFUAI / FujoOS:
+//   magic u32 "FJSH" / ver u32 / seq u64 / kind u32 / len u32 /
+//   t0 u64 / evw u64 / crit u32, payload @0x30, ctx @0x800, size 0xE00.
+// The supervisor writes it with pwrite; the Python model server reads the
+// same file. req.fifo / rsp.fifo carry the FJAI line protocol, and R3
+// (critical event or TTL) discards a stale suggestion.
+
+module fuai_chan
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+use "fuai_ev.lomt"
+use "fuai_ctx.lomt"
+use "fuai_log.lomt"
+
+pub const CH_FRAME_SIZE: u32 = 3584;
+pub const CH_MAGIC: u32 = 1213418054;
+pub const CH_VER: u32 = 2;
+pub const CH_E0: u32 = 1;
+pub const CH_ANOM: u32 = 2;
+pub const CH_PLAN: u32 = 3;
+pub const CH_IO: u32 = 4;
+pub const CH_NLC: u32 = 5;
+pub const CH_ENV: u32 = 6;
+pub const CH_CRIT: u64 = 28;
+pub const CH_PAYLOAD: u32 = 48;
+pub const CH_PAYLOAD_MAX: u32 = 1024;
+pub const CH_CTX: u32 = 2048;
+pub const CH_CTX_MAX: u32 = 1536;
+
+pub fn chan_env_find(s: ptr, key: str, out: ptr, cap: u32) -> u32 {
+    let env: ptr = st_env(s);
+    let n: u32 = st_g(s, ST_ENV_LEN) as u32;
+    let kn: u32 = str_len(key);
+    let i: u32 = 0;
+    while i < n {
+        let start: u32 = i;
+        while i < n && load8(env, i) != 0 {
+            i = i + 1;
+        }
+        let len: u32 = i - start;
+        if len > kn && b_eq(ptr_add(env, start), str_ptr(key), kn) {
+            let vl: u32 = len - kn;
+            if vl >= cap {
+                vl = cap - 1;
+            }
+            b_copy(out, ptr_add(env, start + kn), vl);
+            store8(out, vl, 0 as u8);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chan_path(home: ptr, leaf: str, out: ptr, cap: u32) -> u32 {
+    let p: u32 = 0;
+    p = b_push_bytes(out, cap, p, home, b_strlen(home));
+    p = b_push_lit(out, cap, p, "/");
+    p = b_push_lit(out, cap, p, leaf);
+    store8(out, p, 0 as u8);
+    return p;
+}
+
+pub fn chan_ev_fifo(s: ptr) -> ptr {
+    return st_evp(s);
+}
+
+pub fn chan_init(s: ptr, home_addr: u64) -> i64 {
+    let home: ptr = st_home(s);
+    if home_addr == 0 {
+        let got: u32 = chan_env_find(s, "FUAI_HOME=", home, 512);
+        if got == 0 {
+            b_strcpy(home, str_ptr("/tmp/fuai-link"));
+        }
+    } else {
+        b_strcpy(home, home_addr as ptr);
+    }
+    st_s(s, ST_HOME_LEN, b_strlen(home) as u64);
+
+    let tb: ptr = st_tag(s);
+    if chan_env_find(s, "FUAI_LINK_TIMEOUT=", tb, 24) == 1 {
+        let v: u64 = b_first_num(tb, b_strlen(tb));
+        if v > 0 {
+            st_s(s, ST_LINK_TMO, v);
+        }
+    }
+
+    let req: ptr = st_req(s);
+    let rsp: ptr = st_rsp(s);
+    let evp: ptr = st_evp(s);
+    let fr: ptr = st_buf(s);
+    chan_path(home, "req.fifo", req, 512);
+    chan_path(home, "rsp.fifo", rsp, 512);
+    chan_path(home, "ev.fifo", evp, 512);
+    chan_path(home, "fuai.shm", fr, 512);
+    st_s(s, ST_REQ_LEN, b_strlen(req) as u64);
+    st_s(s, ST_RSP_LEN, b_strlen(rsp) as u64);
+    st_s(s, ST_EV_PATH_LEN, b_strlen(evp) as u64);
+    st_s(s, ST_FRAME_PATH_LEN, b_strlen(fr) as u64);
+
+    let rc: i64 = sy_mkdir(home, 511);
+    if rc != 0 && rc != 0 as i64 - 17 {
+        return 0 as i64 - 1;
+    }
+    sy_mkfifo(req, 4534);
+    sy_mkfifo(rsp, 4534);
+    sy_mkfifo(evp, 4534);
+
+    let fd: i64 = sy_open(fr, 66, 438);
+    if fd < 0 {
+        return 0 as i64 - 1;
+    }
+    sy_ftruncate(fd, 3584);
+    st_s(s, ST_FRAME_FD, fd as u64);
+    b_zero(st_frame(s), 3584);
+    st_s(s, ST_CHAN_OK, 1);
+    return 0;
+}
+
+pub fn chan_close(s: ptr) {
+    let fd: u64 = st_g(s, ST_FRAME_FD);
+    if fd != 4294967295 {
+        sy_close(fd as i64);
+        st_s(s, ST_FRAME_FD, 4294967295);
+    }
+    let rfd: u64 = st_g(s, ST_RSP_FD);
+    if rfd != 4294967295 {
+        sy_close(rfd as i64);
+        st_s(s, ST_RSP_FD, 4294967295);
+    }
+    sy_unlink(st_req(s));
+    sy_unlink(st_rsp(s));
+    sy_unlink(st_evp(s));
+    let fr: ptr = st_buf(s);
+    chan_path(st_home(s), "fuai.shm", fr, 512);
+    sy_unlink(fr);
+    sy_rmdir(st_home(s));
+}
+
+fn chan_write_frame(s: ptr, seq: u64, kind: u64, payload: ptr, len: u32) {
+    let f: ptr = st_frame(s);
+    b_zero(f, 3584);
+    b_st32(f, 0, CH_MAGIC);
+    b_st32(f, 4, CH_VER);
+    b_st64(f, 8, seq);
+    b_st32(f, 16, kind as u32);
+    let n: u32 = len;
+    if n > CH_PAYLOAD_MAX {
+        n = CH_PAYLOAD_MAX;
+    }
+    b_st32(f, 20, n);
+    b_st64(f, 24, st_g(s, ST_SNAP_T0));
+    b_st64(f, 32, st_g(s, ST_SNAP_EVW));
+    b_st32(f, 40, 28);
+    b_copy(ptr_add(f, CH_PAYLOAD), payload, n);
+    let cn: i64 = ctx_struct(s, ptr_add(f, CH_CTX), CH_CTX_MAX);
+    if cn < 0 {
+        cn = 0;
+    }
+    store8(f, CH_CTX + (cn as u32), 0 as u8);
+    let fd: i64 = st_g(s, ST_FRAME_FD) as i64;
+    sy_pwrite(fd, f, 3584, 0);
+}
+
+pub fn chan_send_req(s: ptr, kind: u64, payload: ptr, len: u32) -> u64 {
+    st_s(s, ST_AI_CALLS, st_g(s, ST_AI_CALLS) + 1);
+    let seq: u64 = st_g(s, ST_AI_SEQ) + 1;
+    st_s(s, ST_AI_SEQ, seq);
+    if st_g(s, ST_CHAN_OK) == 0 {
+        return seq;
+    }
+    let t0: u64 = ev_ticks(s);
+    st_s(s, ST_SNAP_T0, t0);
+    st_s(s, ST_SNAP_EVW, ev_write_pos(s));
+    st_s(s, ST_SNAP_CRIT, CH_CRIT);
+    st_s(s, ST_SNAP_VALID, 1);
+    st_s(s, ST_SNAP_REASON, 0);
+    chan_write_frame(s, seq, kind, payload, len);
+
+    let line: ptr = st_argv(s);
+    let p: u32 = 0;
+    p = b_push_lit(line, 512, p, "FJAI:SHM ");
+    p = b_push_dec(line, 512, p, seq, st_dec(s));
+    p = b_push_lit(line, 512, p, " ");
+    p = b_push_dec(line, 512, p, kind, st_dec(s));
+    p = b_push_lit(line, 512, p, " ");
+    p = b_push_dec(line, 512, p, len as u64, st_dec(s));
+    store8(line, p, 10 as u8);
+    p = p + 1;
+
+    let tmo: u64 = st_g(s, ST_LINK_TMO);
+    let start: u64 = ev_ticks(s);
+    let sent: u32 = 0;
+    let going: u32 = 1;
+    while going == 1 {
+        let fd: i64 = sy_open(st_req(s), 2049, 0);
+        if fd >= 0 {
+            sy_write(fd, line, p as u64);
+            sy_close(fd);
+            sent = 1;
+            going = 0;
+        } else {
+            sy_sleep_ms(st_dec(s), 5);
+            if ev_ticks(s) - start >= tmo {
+                going = 0;
+            }
+        }
+    }
+    if sent == 0 {
+        lgs(s, "link : trigger lost (no server on req.fifo)");
+    }
+    return seq;
+}
+
+pub fn chan_seq_ok(line: ptr, len: u32, seq: u64) -> u32 {
+    if len < 9 {
+        return 0;
+    }
+    if b_eq(line, str_ptr("FJAI:RSP "), 9) == false {
+        return 0;
+    }
+    let j: u32 = 9;
+    let v: u64 = 0;
+    while j < len && load8(line, j) >= 48 && load8(line, j) <= 57 {
+        v = v * 10 + (load8(line, j) - 48) as u64;
+        j = j + 1;
+    }
+    if v == seq {
+        return 1;
+    }
+    return 0;
+}
+
+// Find "TTL=<digits>"; returns 1 and writes the value at out.
+pub fn chan_parse_ttl(line: ptr, len: u32, out: ptr) -> u32 {
+    let i: u32 = 0;
+    while i + 4 <= len {
+        if load8(line, i) == 84 && load8(line, i + 1) == 84 &&
+           load8(line, i + 2) == 76 && load8(line, i + 3) == 61 {
+            let v: u64 = 0;
+            let j: u32 = i + 4;
+            while j < len && load8(line, j) >= 48 && load8(line, j) <= 57 {
+                v = v * 10 + (load8(line, j) - 48) as u64;
+                j = j + 1;
+            }
+            b_st64(out, 0, v);
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn chan_ensure_rsp(s: ptr) -> i64 {
+    let fd: u64 = st_g(s, ST_RSP_FD);
+    if fd != 4294967295 {
+        return fd as i64;
+    }
+    let nfd: i64 = sy_open(st_rsp(s), 66, 438);
+    if nfd >= 0 {
+        st_s(s, ST_RSP_FD, nfd as u64);
+    }
+    return nfd;
+}
+
+pub fn chan_wait_rsp(s: ptr, seq: u64, line: ptr, cap: u32) -> u32 {
+    let fd: i64 = chan_ensure_rsp(s);
+    if fd < 0 || st_g(s, ST_CHAN_OK) == 0 {
+        return 0;
+    }
+    let t0: u64 = ev_ticks(s);
+    let buf: ptr = st_ctxb(s);
+    let chunk: ptr = st_payload(s);
+    let ln: u32 = 0;
+    let tmo: u64 = st_g(s, ST_LINK_TMO);
+    let going: u32 = 1;
+    while going == 1 {
+        let pfd: ptr = st_tag(s);
+        sy_pollfd_set(pfd, fd, 1);
+        let pr: i64 = sy_poll(pfd, 1, 100);
+        if pr > 0 && (sy_poll_revents(pfd) % 2) == 1 {
+            let r: i64 = sy_read(fd, chunk, 256);
+            let rn: u32 = r as u32;
+            let i: u32 = 0;
+            while r > 0 && i < rn {
+                let b: u32 = load8(chunk, i);
+                if b == 10 {
+                    let is_mine: u32 = 0;
+                    if ln >= 9 && b_eq(buf, str_ptr("FJAI:RSP "), 9) {
+                        is_mine = chan_seq_ok(buf, ln, seq);
+                    }
+                    if is_mine == 1 {
+                        if st_g(s, ST_SNAP_VALID) == 1 {
+                            let crit_n: u64 =
+                                ev_delta_critical(s, st_g(s, ST_SNAP_EVW),
+                                                  st_g(s, ST_SNAP_CRIT));
+                            let el: u64 = ev_ticks(s) - st_g(s, ST_SNAP_T0);
+                            let ttl: ptr = st_stat(s);
+                            b_st64(ttl, 0, 0);
+                            let has: u32 = chan_parse_ttl(buf, ln, ttl);
+                            if crit_n > 0 {
+                                st_s(s, ST_SNAP_VALID, 0);
+                                st_s(s, ST_SNAP_REASON, 1);
+                                lg1(s, "link : DISCARD crit_ev=", crit_n);
+                                return 0;
+                            }
+                            if has == 1 && el > b_ld64(ttl, 0) {
+                                st_s(s, ST_SNAP_VALID, 0);
+                                st_s(s, ST_SNAP_REASON, 2);
+                                lg2(s, "link : DISCARD ttl el=", el,
+                                    " ttl=", b_ld64(ttl, 0), "");
+                                return 0;
+                            }
+                            st_s(s, ST_SNAP_VALID, 0);
+                        }
+                        let n: u32 = ln;
+                        if n >= cap {
+                            n = cap - 1;
+                        }
+                        b_copy(line, buf, n);
+                        store8(line, n, 0 as u8);
+                        return n;
+                    }
+                    ln = 0;
+                } else {
+                    if ln < 510 {
+                        store8(buf, ln, b as u8);
+                        ln = ln + 1;
+                    }
+                }
+                i = i + 1;
+            }
+        }
+        if ev_ticks(s) - t0 > tmo {
+            st_s(s, ST_SNAP_VALID, 0);
+            going = 0;
+        }
+    }
+    return 0;
+}
+
+pub fn chan_ai_calls(s: ptr) -> u64 {
+    return st_g(s, ST_AI_CALLS);
+}
+
+pub fn chan_snapshot(s: ptr, out: ptr) {
+    b_st64(out, 0, st_g(s, ST_SNAP_EVW));
+    b_st64(out, 8, st_g(s, ST_SNAP_CRIT));
+    b_st64(out, 16, st_g(s, ST_SNAP_REASON));
+}
+
+pub fn chan_rewind_t0(s: ptr, t: u64) {
+    st_s(s, ST_SNAP_T0, st_g(s, ST_SNAP_T0) - t);
+}
+
+pub fn chan_r3_discarded(s: ptr) -> u32 {
+    return st_g(s, ST_SNAP_REASON) as u32;
+}

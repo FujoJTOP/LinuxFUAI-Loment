@@ -1,0 +1,31 @@
+// fuai_log.lomt — stderr diagnostics, built without printf.
+
+module fuai_log
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_sys.lomt"
+use "fuai_state.lomt"
+
+pub fn lgs(s: ptr, lit: str) {
+    sy_puts(2, lit);
+}
+
+pub fn lg1(s: ptr, head: str, a: u64) {
+    lg2(s, head, a, "", 0, "");
+}
+
+pub fn lg2(s: ptr, head: str, a: u64, mid: str, b: u64, tail: str) {
+    let buf: ptr = st_buf(s);
+    let p: u32 = 0;
+    p = b_push_lit(buf, 512, p, head);
+    p = b_push_dec(buf, 512, p, a, st_dec(s));
+    p = b_push_lit(buf, 512, p, mid);
+    if b != 0 {
+        p = b_push_dec(buf, 512, p, b, st_dec(s));
+    }
+    p = b_push_lit(buf, 512, p, tail);
+    store8(buf, p, 10 as u8);
+    sy_write(2, buf, (p + 1) as u64);
+}

@@ -1,0 +1,49 @@
+// l8_nlc.lomt — natural-language config offline + S3 policy guards.
+// Port of LinuxFUAI tests/l8_nlc.c.
+
+module l8_nlc
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+    let neg22: i64 = 0 as i64 - 22;
+
+    let out: ptr = alloc(32);
+    nlc_set(s, str_ptr("ban games 9 to 18"), 17, out);
+    t_check(s, b_ld64(out, 0) == 3, "ban policy applied", b_ld64(out, 0), 3);
+    t_check(s, cfg_get(s, 3) == 1 && cfg_get(s, 4) == 9 && cfg_get(s, 5) == 18,
+            "cfg 3/4/5 set", cfg_get(s, 4) as u64, 9);
+
+    nlc_set(s, str_ptr("hello world"), 11, out);
+    t_check(s, b_ld64(out, 0) == 1 && cfg_get(s, 6) == 0, "default policy",
+            b_ld64(out, 0), 1);
+
+    let r1: i64 = cfg_set(s, 1, 999);
+    t_check(s, r1 == neg22, "cfg1 domain reject", r1 as u64, neg22 as u64);
+    let r2: i64 = cfg_set(s, 2, 7);
+    t_check(s, r2 == neg22, "cfg2 domain reject", r2 as u64, neg22 as u64);
+
+    let r3: i64 = cfg_set(s, 7, 0);
+    t_check(s, r3 == neg22, "tau_high=0 rejected", r3 as u64, neg22 as u64);
+    let r4: i64 = cfg_set(s, 8, 999);
+    t_check(s, r4 == neg22, "tau_low=999 rejected", r4 as u64, neg22 as u64);
+    let r5: i64 = cfg_set(s, 1, 999);
+    t_check(s, r5 == neg22, "anom threshold 999 rejected", r5 as u64, neg22 as u64);
+    t_check(s, cfg_get(s, 7) > cfg_get(s, 8), "tau invariant holds", 1, 1);
+
+    let r6: i64 = cfg_set(s, 7, 46);
+    let r7: i64 = cfg_set(s, 8, 35);
+    t_check(s, r6 == 0 && r7 == 0, "legal tau retune", 0, 0);
+    let r8: i64 = cfg_set(s, 7, 30);
+    t_check(s, r8 == neg22, "tau_high<=tau_low rejected", r8 as u64, neg22 as u64);
+
+    fuai_shutdown(s);
+    t_done(s, 8, "l8");
+}

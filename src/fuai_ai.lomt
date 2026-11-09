@@ -1,0 +1,98 @@
+// fuai_ai.lomt — the AI audit ring (16 entries x 88 bytes).
+//
+// Entry layout is the LinuxFUAI one: {engine, duty, out, a, b, result,
+// text[40]}. Keeping the byte layout means the export functions below are
+// comparable with the C implementation entry by entry.
+
+module fuai_ai
+
+choose runtime
+
+use "fuai_byte.lomt"
+use "fuai_state.lomt"
+
+pub const AI_N: u32 = 16;
+pub const AI_SZ: u32 = 88;
+
+pub fn ai_entry(s: ptr, idx: u32) -> ptr {
+    return ptr_add(st_aia(s), idx * 88);
+}
+
+pub fn ai_note(s: ptr, duty: u64, engine: u64, out_v: u64, a: u64, b: u64,
+               result: u64, text: ptr, tlen: u32) {
+    let pos: u64 = st_g(s, ST_AI_POS);
+    let e: ptr = ai_entry(s, (pos % 16) as u32);
+    b_st64(e, 0, engine);
+    b_st64(e, 8, duty);
+    b_st64(e, 16, out_v);
+    b_st64(e, 24, a);
+    b_st64(e, 32, b);
+    b_st64(e, 40, result);
+    let n: u32 = tlen;
+    if n > 40 {
+        n = 40;
+    }
+    b_copy(ptr_add(e, 48), text, n);
+    if n < 40 {
+        store8(e, 48 + n, 0 as u8);
+    }
+    st_s(s, ST_AI_POS, pos + 1);
+}
+
+pub fn ai_count(s: ptr) -> u64 {
+    let p: u64 = st_g(s, ST_AI_POS);
+    if p < 16 {
+        return p;
+    }
+    return 16;
+}
+
+pub fn ai_pos(s: ptr) -> u64 {
+    return st_g(s, ST_AI_POS);
+}
+
+// Export the newest entries as 4 u64 words each (engine, duty, result, 0).
+pub fn ai_export32(s: ptr, out: ptr, max_entries: u64) -> i64 {
+    let n: u64 = max_entries;
+    let pos: u64 = st_g(s, ST_AI_POS);
+    if n > 16 {
+        n = 16;
+    }
+    if n > pos {
+        n = pos;
+    }
+    let i: u64 = 0;
+    while i < n {
+        let idx: u64 = (pos + 16 - n + i) % 16;
+        let e: ptr = ai_entry(s, idx as u32);
+        b_st64(out, (i * 32) as u32, b_ld64(e, 0));
+        b_st64(out, (i * 32 + 8) as u32, b_ld64(e, 8));
+        b_st64(out, (i * 32 + 16) as u32, b_ld64(e, 40));
+        b_st64(out, (i * 32 + 24) as u32, 0);
+        i = i + 1;
+    }
+    return n as i64;
+}
+
+// Export the newest entries in their native 88-byte layout.
+pub fn ai_export88(s: ptr, out: ptr, cap: u64) -> i64 {
+    let n: u64 = cap / 88;
+    let pos: u64 = st_g(s, ST_AI_POS);
+    if n > 16 {
+        n = 16;
+    }
+    if n > pos {
+        n = pos;
+    }
+    let i: u64 = 0;
+    while i < n {
+        let idx: u64 = (pos + 16 - n + i) % 16;
+        b_copy(ptr_add(out, (i * 88) as u32), ai_entry(s, idx as u32), 88);
+        i = i + 1;
+    }
+    return n as i64;
+}
+
+pub fn ai_boot(s: ptr) {
+    ai_note(s, 6, 0, 0, 0, 0, 0, str_ptr("boot"), 4);
+}

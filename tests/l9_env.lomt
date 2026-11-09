@@ -1,0 +1,39 @@
+// l9_env.lomt — environment scan offline + structural context + digest.
+// Port of LinuxFUAI tests/l9_env.c.
+
+module l9_env
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    fuai_payload_main(s);
+    fuai_set_link_timeout(s, 3);
+    t_reset(s);
+
+    let out: ptr = alloc(32);
+    env_scan(s, out);
+    t_check(s, b_ld64(out, 0) == 2, "profile=2 (rules fallback)",
+            b_ld64(out, 0), 2);
+    t_check(s, b_ld64(out, 8) == 1, "scene=desktop (code 1)", b_ld64(out, 8), 1);
+    t_check(s, b_ld64(out, 16) > 10, "digest from /proc non-empty",
+            b_ld64(out, 16), 10);
+    t_check(s, cfg_get(s, 6) == 2, "cfg6 = profile", 2, 2);
+
+    let ctx: ptr = alloc(512);
+    let n: i64 = ctx_struct(s, ctx, 512);
+    t_check(s, n > 0, "ctx_struct non-empty", n as u64, 0);
+    t_check(s, b_eq(ctx, str_ptr("fujoctx v2 "), 11), "ctx v2 header", 1, 1);
+
+    ev_inject(s, EV_SYSCALL, 1, 0);
+    let dig: ptr = alloc(128);
+    let dn: i64 = ev_digest(s, dig, 128);
+    t_check(s, dn > 0 && b_eq(dig, str_ptr("ev pid="), 7), "ev_digest shape",
+            1, 1);
+
+    fuai_shutdown(s);
+    t_done(s, 9, "l9");
+}

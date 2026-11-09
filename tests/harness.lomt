@@ -1,0 +1,54 @@
+// harness.lomt — the fujoregress test helpers (same output shape as the C
+// suite: "  ok   <what>" / "  FAIL <what> got=... want=..." and a final
+// "lN: LN RESULT: PASS|FAIL").
+
+module harness
+
+choose runtime
+
+use "../src/fuai.lomt"
+
+const H_FAIL: u32 = 185;
+
+fn h_num(fd: i64, v: u64) {
+    let buf: ptr = alloc(64);
+    let n: u32 = b_dec_into(buf, 64, v);
+    sy_write(fd, buf, n as u64);
+}
+
+pub fn t_reset(s: ptr) {
+    st_s(s, H_FAIL, 1);
+}
+
+pub fn t_check(s: ptr, cond: bool, what: str, got: u64, want: u64) {
+    if cond == true {
+        sy_puts(1, "  ok   ");
+        sy_puts(1, what);
+        sy_puts(1, " (");
+        h_num(1, got);
+        sy_puts(1, ")\n");
+    } else {
+        st_s(s, H_FAIL, 0);
+        sy_puts(1, "  FAIL ");
+        sy_puts(1, what);
+        sy_puts(1, " got=");
+        h_num(1, got);
+        sy_puts(1, " want=");
+        h_num(1, want);
+        sy_puts(1, "\n");
+    }
+}
+
+pub fn t_done(s: ptr, n: u32, name: str) {
+    sy_puts(1, name);
+    sy_puts(1, ": L");
+    h_num(1, n as u64);
+    sy_puts(1, " RESULT: ");
+    if st_g(s, H_FAIL) == 1 {
+        sy_puts(1, "PASS\n");
+        sy_exit(0);
+    } else {
+        sy_puts(1, "FAIL\n");
+        sy_exit(1);
+    }
+}
