@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
-"""build.py — compile one Loment test with the reference toolchain.
+"""build.py — compile one Loment test.
 
-The self-hosted compiler (0.1.4 package) has a small per-unit string-literal
-table; a unit that pulls in several modules overflows it ("fujoc-s: cannot
-open <fragment>"). The reference compiler in the Loment checkout has no such
-limit and its lomelf twin emits the same static ELF, so this build script uses
-that pair. Set LOMENT_REPO to the checkout (or clone it from GitHub).
+Preferred: a packaged loment >= 0.1.5.1 (LOMENT_BIN or PATH). This port
+declares capability domains, and the reference compiler resolves a
+dependency's guard against the entry unit's table (issue #1175), silently
+emitting `[0..0]`; the binary then traps at the first in-range guard. So the
+reference path is refused for code generation here — it stays available for
+`--check`, and for units without capability declarations.
 
-  LOMENT_REPO=~/Loment python3 tools/build.py tests/l1_inv.lomt -o build/l1_inv
+  LOMENT_BIN=~/opt/loment-0.1.5.1-linux-x64/bin/loment       python3 tools/build.py tests/l1_inv.lomt -o build/l1_inv
 """
 from __future__ import annotations
 
@@ -108,6 +109,14 @@ def main(argv: list[str] | None = None) -> int:
     src = Path(a.src).resolve()
     mod = lomentc.load(src)
     deps = lomentc.resolve_deps(mod, repo, src.parent, entry=src)
+    has_caps = bool(getattr(mod, "caps", [])) or any(
+        getattr(d, "caps", []) for d in deps)
+    if has_caps and not a.check:
+        print("refusing to emit: this unit declares capability domains, and the "
+              "reference compiler resolves a dependency's guard against the "
+              "entry table (issue #1175) — the binary would trap. Use the "
+              "packaged loment >= 0.1.5.1 via LOMENT_BIN.", file=sys.stderr)
+        return 1
     errs = lomentc.check(mod, deps=deps)
     if errs:
         for e in errs:

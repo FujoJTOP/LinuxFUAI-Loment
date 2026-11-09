@@ -10,6 +10,14 @@ module fuai_core
 
 choose runtime
 
+// FUAI's three index spaces as Loment capability domains. They live in this
+// module because the reference compiler resolves a `guard`'s capability in
+// the module that writes the guard (the self-hosted one also accepts a
+// declaration from another module; the reference does not).
+capability fuai_slots : slot[0..7] revocable
+capability fuai_domains : domain[0..4] revocable
+capability fuai_actions : act[1..7] revocable
+
 use "fuai_byte.lomt"
 use "fuai_sys.lomt"
 use "fuai_state.lomt"

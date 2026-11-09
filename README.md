@@ -79,15 +79,14 @@ explicitly:
 export LOMENT_BIN=~/opt/loment-0.1.5.1-linux-x64/bin/loment
 ```
 
-**Older packages (0.1.4.x)** have a small per-unit string-literal table that a
-unit this size overflows (`fujoc-s: cannot open …`). For those, `build.py`
-falls back to the reference compiler and its `lomelf` twin in a Loment
-checkout:
-
-```bash
-git clone https://github.com/Loment-Lang/Loment.git ~/Loment
-export LOMENT_REPO=~/Loment
-```
+**0.1.5.1 or newer is required to build.** The port declares capability
+domains, and the reference compiler resolves a dependency's `guard` against
+the **entry unit's** table (Loment issue #1175): it silently emits `[0..0]`
+and the resulting binary traps at the first in-range guard (measured: the
+reference-built `l15_capdom` exits 132, SIGILL). `tools/build.py` therefore
+refuses to emit a binary from the reference path for this unit and names
+#1175; the reference remains usable for `--check`. 0.1.4.x cannot build a
+unit with capability declarations at all.
 
 The product is a **freestanding static ELF** (`readelf -l` shows no
 `INTERP`), so the supervisor runs on any Debian x86-64 kernel without glibc.
@@ -108,7 +107,7 @@ The supervisor binaries are statically linked (`readelf -l` shows no
 ## Capability domains
 
 The port declares FUAI's three index spaces as Loment capability domains
-(`src/fuai_caps.lomt`):
+(`src/fuai_core.lomt`):
 
 | domain | range | guards |
 |---|---|---|

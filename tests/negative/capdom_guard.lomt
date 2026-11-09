@@ -6,7 +6,7 @@ module capdom_guard
 
 choose runtime
 
-use "../../src/fuai_caps.lomt"
+capability fuai_slots : slot[0..7] revocable
 
 fn _start() {
     guard fuai_slots(8);
