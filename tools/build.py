@@ -115,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing to emit: this unit declares capability domains, and the "
               "reference compiler resolves a dependency's guard against the "
               "entry table (issue #1175) — the binary would trap. Use the "
-              "packaged loment >= 0.1.5.1 via LOMENT_BIN.", file=sys.stderr)
+              "packaged loment >= 0.1.5.1 via LOMENT_BIN, or a build "
+              "that contains PR #1526.", file=sys.stderr)
         return 1
     errs = lomentc.check(mod, deps=deps)
     if errs:

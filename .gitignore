@@ -1,4 +1,5 @@
 build/
+build-*/
 adapters/*.so
 adapters/fuai_eyes_payload
 __pycache__/
