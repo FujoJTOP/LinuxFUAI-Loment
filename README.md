@@ -58,17 +58,34 @@ tools/          build.py, regress.py, model_server.py
 
 ## Build (Debian)
 
-The self-hosted 0.1.4 package has a small per-unit string-literal table; a
-unit that pulls in this many modules overflows it (`fujoc-s: cannot open …`).
-The reference compiler and its `lomelf` twin in the Loment checkout have no
-such limit, so the build uses that pair:
+**Preferred: the packaged toolchain, 0.1.5.1 or newer.** It builds this whole
+multi-module unit directly. Download the Linux x64 tarball from the release
+page, unpack it, and put its `bin/` on `PATH` (or point `LOMENT_BIN` at it):
+
+```bash
+mkdir -p ~/opt && tar -xzf loment-0.1.5.1-linux-x64.tar.gz -C ~/opt
+export PATH=~/opt/loment-0.1.5.1-linux-x64/bin:$PATH
+make build          # python3 tools/regress.py --build
+make adapters       # optional: C shim + shim payload
+make regress
+```
+
+`tools/build.py` picks a native Linux `loment` automatically (it rejects the
+Windows install reached through WSL interop, which emits PE). To name it
+explicitly:
+
+```bash
+export LOMENT_BIN=~/opt/loment-0.1.5.1-linux-x64/bin/loment
+```
+
+**Older packages (0.1.4.x)** have a small per-unit string-literal table that a
+unit this size overflows (`fujoc-s: cannot open …`). For those, `build.py`
+falls back to the reference compiler and its `lomelf` twin in a Loment
+checkout:
 
 ```bash
 git clone https://github.com/Loment-Lang/Loment.git ~/Loment
 export LOMENT_REPO=~/Loment
-make build          # python3 tools/regress.py --build
-make adapters       # optional: C shim + shim payload
-make regress
 ```
 
 The product is a **freestanding static ELF** (`readelf -l` shows no
@@ -78,9 +95,10 @@ target distribution.
 
 ## Verified
 
-- **Debian GNU/Linux 13 (trixie) x86-64**: built from source with the Loment
-  reference toolchain and run natively — **14/14 PASS**, optional `l11b_shim`
-  PASS. Toolchain: Loment `main` at `0328abbc` (2026-11-09).
+- **Debian GNU/Linux 13 (trixie) x86-64**: built from source and run natively
+  — **14/14 PASS**, optional `l11b_shim` PASS. Two toolchains both verified:
+  the packaged **0.1.5.1** Linux release, and the reference pair from Loment
+  `main` at `0328abbc` (2026-11-09).
 - Ubuntu 26.04 x86-64 (WSL): 14/14 PASS.
 
 The supervisor binaries are statically linked (`readelf -l` shows no

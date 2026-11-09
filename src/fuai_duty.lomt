@@ -578,10 +578,10 @@ pub fn nlc_set(s: ptr, text: ptr, tlen: u32, out: ptr) -> i64 {
         if load8(pol, i) == 80 && load8(pol, i + 1) == 79 &&
            load8(pol, i + 2) == 76 && load8(pol, i + 3) == 61 {
             i = i + 4;
-            let k: u64 = 0;
+            let key: u64 = 0;
             let kk: u32 = 0;
             while i < plen && load8(pol, i) >= 48 && load8(pol, i) <= 57 {
-                k = k * 10 + (load8(pol, i) - 48) as u64;
+                key = key * 10 + (load8(pol, i) - 48) as u64;
                 i = i + 1;
                 kk = 1;
             }
@@ -598,10 +598,10 @@ pub fn nlc_set(s: ptr, text: ptr, tlen: u32, out: ptr) -> i64 {
                     i = i + 1;
                     vs = 1;
                 }
-                let csrc: i64 = cfg_set(s, k, val);
-                if vs == 1 && k >= 1 && k <= 8 && csrc == 0 {
+                let csrc: i64 = cfg_set(s, key, val);
+                if vs == 1 && key >= 1 && key <= 8 && csrc == 0 {
                     applied = applied + 1;
-                    let back: i64 = cfg_get(s, k);
+                    let back: i64 = cfg_get(s, key);
                     if (back as u64) == val {
                         verified = verified + 1;
                     }
