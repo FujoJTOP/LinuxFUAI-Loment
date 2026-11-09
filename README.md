@@ -80,7 +80,7 @@ target distribution.
 
 - **Debian GNU/Linux 13 (trixie) x86-64**: built from source with the Loment
   reference toolchain and run natively — **14/14 PASS**, optional `l11b_shim`
-  PASS.
+  PASS. Toolchain: Loment `main` at `0328abbc` (2026-11-09).
 - Ubuntu 26.04 x86-64 (WSL): 14/14 PASS.
 
 The supervisor binaries are statically linked (`readelf -l` shows no
