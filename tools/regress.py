@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +28,8 @@ OFFLINE = [
     "l7_io", "l8_nlc", "l9_env", "l10_trust", "l11_eyes", "l12_link",
 ]
 ONLINE = [("l13_model", {}), ("l14_adversarial", {"FUJO_EVIL": "1"})]
+EXTRA = ["l15_capdom"]
+NEGATIVE = "tests/negative/capdom_guard.lomt"
 
 
 def run_case(name: str, bindir: Path, env: dict, timeout: float):
@@ -67,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     bindir = Path(a.bin).resolve()
 
     if a.build:
-        for name in OFFLINE + [n for n, _ in ONLINE] + ["l11b_shim"]:
+        for name in OFFLINE + [n for n, _ in ONLINE] + EXTRA + ["l11b_shim"]:
             cmd = [sys.executable, str(ROOT / "tools" / "build.py"),
                    str(ROOT / "tests" / f"{name}.lomt"),
                    "-o", str(bindir / name)]
@@ -101,6 +104,21 @@ def main(argv: list[str] | None = None) -> int:
         results.append((name, ok, out))
         failures += 0 if ok else 1
 
+    extra = []
+    for name in EXTRA:
+        ok, out = run_case(name, bindir, {"FUAI_HOME": f"/tmp/fuai-link-{name}"},
+                           a.timeout)
+        extra.append((name, ok, out))
+
+    neg_exe = os.environ.get("LOMENT_BIN") or shutil.which("loment")
+    neg_src = ROOT / NEGATIVE
+    if neg_exe and neg_src.exists():
+        p = subprocess.run([neg_exe, "check", str(neg_src), "--short"],
+                           capture_output=True, text=True)
+        out = (p.stdout or "") + (p.stderr or "")
+        ok = p.returncode != 0 and "E004" in out
+        extra.append(("capdom_guard (E004)", ok, out))
+
     # Optional: the C LD_PRELOAD shim path (adapters/ built with make).
     opt = []
     lib = ROOT / "adapters" / "libfuaieyes.so"
@@ -115,6 +133,13 @@ def main(argv: list[str] | None = None) -> int:
     print()
     print("=" * 62)
     for name, ok, out in results:
+        print(f"  {name:<18} {'PASS' if ok else 'FAIL'}")
+        if not ok:
+            tail = "\n".join(out.strip().splitlines()[-15:])
+            print("    ---- tail ----")
+            for line in tail.splitlines():
+                print(f"    {line}")
+    for name, ok, out in extra:
         print(f"  {name:<18} {'PASS' if ok else 'FAIL'}")
         if not ok:
             tail = "\n".join(out.strip().splitlines()[-15:])

@@ -51,7 +51,8 @@ src/            the Loment implementation (~3.6k lines)
   fuai_duty      five duties, quality ledger, trust-adaptive domains
   fuai_probe     axiom self-check (0x830A) + R3 probe
   fuai           lifecycle facade
-tests/          14 regression cases + harness (+ optional l11b shim case)
+tests/          14 regression cases + harness, l15 capability-domain case,
+                a negative E004 fixture, and the optional l11b shim case
 adapters/       C LD_PRELOAD eye shim and a libc payload (MIT)
 tools/          build.py, regress.py, model_server.py
 ```
@@ -103,6 +104,27 @@ target distribution.
 
 The supervisor binaries are statically linked (`readelf -l` shows no
 `INTERP`), so no glibc is involved on the FUAI side.
+
+## Capability domains
+
+The port declares FUAI's three index spaces as Loment capability domains
+(`src/fuai_caps.lomt`):
+
+| domain | range | guards |
+|---|---|---|
+| `fuai_slots` | 0..7 | `cap_grant`, `cap_check` |
+| `fuai_domains` | 0..4 | `dom_create`, `dom_bind`, `dom_revoke`, `dom_adjust`, `dom_info`, `task_bind_domain` |
+| `fuai_actions` | 1..7 | `cap_exec` (after authorization) |
+
+Every guard sits **after** the dynamic FUAI check, so the contract is
+unchanged: an out-of-range slot or domain still returns `-22`, an
+unauthorized action still returns `-1`, and none of them traps. What the
+language adds is the declared shape (visible in `loment caps`) and a
+compile-time E004 for a literal index that can never be valid
+(`tests/negative/capdom_guard.lomt`).
+
+`guard` is not the authorization. The gate remains `cap_exec` and the table
+in `fuai_core`; a guard is an index invariant, not a permission check.
 
 ## Honest boundaries
 

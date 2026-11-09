@@ -1,0 +1,14 @@
+// capdom_guard.lomt — a negative fixture: a literal slot index outside the
+// declared capability domain must be E004 at compile time, before any code
+// is emitted. `loment check` is expected to fail.
+
+module capdom_guard
+
+choose runtime
+
+use "../../src/fuai_caps.lomt"
+
+fn _start() {
+    guard fuai_slots(8);
+    syscall4(60, 0, 0, 0);
+}

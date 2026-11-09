@@ -1,0 +1,61 @@
+// l15_capdom.lomt — FUAI's three index spaces under Loment capability domains.
+//
+// The guards are placed after the dynamic FUAI checks, so the contract is
+// unchanged: an out-of-range slot/domain still returns -22, an unauthorized
+// action still returns -1, and none of them traps. What the language adds is
+// the declaration of the three shapes and a compile-time E004 for a literal
+// that can never be valid (tests/negative/capdom_guard.lomt).
+
+module l15_capdom
+
+choose runtime
+
+use "harness.lomt"
+
+fn _start() {
+    let s: ptr = st_new();
+    fuai_init(s, 0 as u64);
+    t_reset(s);
+    let neg1: i64 = 0 as i64 - 1;
+    let neg22: i64 = 0 as i64 - 22;
+
+    // slots 0..7
+    let g: i64 = cap_grant(s, 6, ALL_ACTS);
+    t_check(s, g == 0, "slot 6 grant under cap domain", g as u64, 0);
+    let c: i64 = cap_check(s, 6, 1);
+    t_check(s, c == 0, "slot 6 check", c as u64, 0);
+    let g8: i64 = cap_grant(s, 8, 0);
+    t_check(s, g8 == neg22, "slot 8 still -22 (guard after check)",
+            g8 as u64, neg22 as u64);
+    let c8: i64 = cap_check(s, 8, 1);
+    t_check(s, c8 == neg22, "slot 8 check still -22", c8 as u64, neg22 as u64);
+
+    // domains 0..4
+    let d: i64 = dom_create(s, 0, 1, 0);
+    t_check(s, d >= 1 && d < 5, "domain create under cap domain", d as u64, 1);
+    let b: i64 = dom_bind(s, d as u64);
+    t_check(s, b == 0, "domain bind", b as u64, 0);
+    let b5: i64 = dom_bind(s, 5);
+    t_check(s, b5 == neg22, "domain 5 still -22", b5 as u64, neg22 as u64);
+    let r5: i64 = dom_revoke(s, 5);
+    t_check(s, r5 == neg22, "revoke domain 5 still -22", r5 as u64, neg22 as u64);
+    let a0: i64 = dom_adjust(s, 0, 0);
+    t_check(s, a0 == neg22, "adjust domain 0 still -22", a0 as u64, neg22 as u64);
+    let info: ptr = alloc(200);
+    dom_info(s, info);
+    t_check(s, b_ld64(info, (d as u32) * 40) == d as u64, "domain table read",
+            b_ld64(info, (d as u32) * 40), d as u64);
+    dom_revoke(s, d as u64);
+    dom_bind(s, 0);
+
+    // actions 1..7
+    let x0: i64 = cap_exec(s, 0, 0, 0);
+    t_check(s, x0 == neg1, "act 0 denied (no guard trap)", x0 as u64, neg1 as u64);
+    let x8: i64 = cap_exec(s, 8, 0, 0);
+    t_check(s, x8 == neg1, "act 8 denied (no guard trap)", x8 as u64, neg1 as u64);
+    let x4: i64 = cap_exec(s, ACT_SET_CFG, 1, 42);
+    t_check(s, x4 == 0, "act 4 authorized under cap domain", x4 as u64, 0);
+
+    fuai_shutdown(s);
+    t_done(s, 15, "l15");
+}
