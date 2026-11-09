@@ -25,10 +25,11 @@ def loment_repo() -> Path:
     if env:
         return Path(env).resolve()
     candidates = [
-        ROOT.parent / "Loment-DEV-wt-fuai",
-        ROOT.parent / "Loment-DEV",
+        ROOT.parent / "loment-base-origin-main",
+        ROOT.parent / "Loment",
         Path.home() / "Loment",
         Path("/opt/Loment"),
+        ROOT.parent / "Loment-DEV",
     ]
     for c in candidates:
         if (c / "tools" / "lomentc.py").exists():
@@ -45,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
 
     repo = loment_repo()
+    print(f"[toolchain] {repo}")
     sys.path.insert(0, str(repo / "tools"))
     import lomentc  # noqa: E402
     import lomelf  # noqa: E402
