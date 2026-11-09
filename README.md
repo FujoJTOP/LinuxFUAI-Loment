@@ -127,6 +127,10 @@ The supervisor binaries are statically linked (`readelf -l` shows no
   model-originated actions; they are not a kernel sandbox.
 - **`/proc` and FIFOs are the substrate.** Environment, argv and the machine
   digest are read from `/proc`; the model link is a FIFO pair.
+- **Toolchain ceilings are real.** Under 0.1.5.1 a single source file must stay
+  below 480 KiB (E999), and two name-form `use <module>` lines against the
+  shipped store still fail when the store root is long (Loment issue #37).
+  This port uses path-form `use "..."` only, which is why its 15 modules build.
 
 ## License
 
