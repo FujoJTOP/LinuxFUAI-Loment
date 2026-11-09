@@ -47,3 +47,113 @@ pub fn fuai_set_link_timeout(s: ptr, ticks: u64) {
         st_s(s, ST_LINK_TMO, ticks);
     }
 }
+// ---- LinuxFUAI public API aliases -----------------------------------------
+// The reference header names every primitive `fuai_*`; these wrappers keep
+// that surface so a reader can map include/fuai.h line by line. The state
+// pointer is the first argument in every case (Loment has no globals).
+
+pub fn fuai_cap_grant(s: ptr, idx: u64, perm: u64) -> i64 {
+    return cap_grant(s, idx, perm);
+}
+pub fn fuai_cap_check(s: ptr, idx: u64, perm: u64) -> i64 {
+    return cap_check(s, idx, perm);
+}
+pub fn fuai_cap_exec(s: ptr, act: u64, a0: u64, a1: u64) -> i64 {
+    return cap_exec(s, act, a0, a1);
+}
+pub fn fuai_aud_log(s: ptr, action: u64, subject: u64) -> i64 {
+    return aud_log(s, action, subject);
+}
+pub fn fuai_aud_read(s: ptr, out: ptr, cap: u64) -> i64 {
+    return aud_read(s, out, cap);
+}
+pub fn fuai_aud_tail(s: ptr, out: ptr) { aud_tail(s, out); }
+pub fn fuai_denies(s: ptr) -> u64 { return denies(s); }
+pub fn fuai_aud_num(s: ptr) -> u64 { return aud_num(s); }
+pub fn fuai_cfg_get(s: ptr, key: u64) -> i64 { return cfg_get(s, key); }
+pub fn fuai_cfg_set(s: ptr, key: u64, val: u64) -> i64 { return cfg_set(s, key, val); }
+pub fn fuai_dom_create(s: ptr, perm: u64, as_mask: u64, irq: u64) -> i64 {
+    return dom_create(s, perm, as_mask, irq);
+}
+pub fn fuai_dom_bind(s: ptr, id: u64) -> i64 { return dom_bind(s, id); }
+pub fn fuai_dom_revoke(s: ptr, id: u64) -> i64 { return dom_revoke(s, id); }
+pub fn fuai_dom_info(s: ptr, out: ptr) { dom_info(s, out); }
+pub fn fuai_dom_adjust(s: ptr, id: u64, perm: u64) -> i64 {
+    return dom_adjust(s, id, perm);
+}
+pub fn fuai_current_domain_id(s: ptr) -> u64 { return current_domain(s); }
+pub fn fuai_ev_push(s: ptr, kind: u64, pid: u64, a: u64, b: u64) {
+    ev_push(s, kind, pid, a, b, ev_ticks(s));
+}
+pub fn fuai_ev_write_pos(s: ptr) -> u64 { return ev_write_pos(s); }
+pub fn fuai_ev_delta_critical(s: ptr, from: u64, crit: u64) -> u64 {
+    return ev_delta_critical(s, from, crit);
+}
+pub fn fuai_ev_stats_recent(s: ptr, win: u64, out: ptr) {
+    ev_stats_recent(s, win, out);
+}
+pub fn fuai_ctx_subscribe(s: ptr, mask: u64) -> i64 {
+    ev_subscribe(s, mask);
+    return 0;
+}
+pub fn fuai_ctx_events(s: ptr, out: ptr, cap: u64) -> i64 {
+    return ev_events(s, out, cap);
+}
+pub fn fuai_ctx_inject(s: ptr, kind: u64, a: u64, b: u64) -> i64 {
+    ev_inject(s, kind, a, b);
+    return 0;
+}
+pub fn fuai_ctx_struct(s: ptr, out: ptr, cap: u32) -> i64 {
+    return ctx_struct(s, out, cap);
+}
+pub fn fuai_ev_digest(s: ptr, out: ptr, cap: u32) -> i64 {
+    return ev_digest(s, out, cap);
+}
+pub fn fuai_r3_discarded(s: ptr) -> i64 { return chan_r3_discarded(s) as i64; }
+pub fn fuai_evl_mode(s: ptr, mode: u64) -> i64 { return evl_mode(s, mode); }
+pub fn fuai_classify(s: ptr, text: ptr, len: u32) -> i64 {
+    return classify(s, text, len);
+}
+pub fn fuai_anom_run(s: ptr, digest: ptr, len: u32, out: ptr) -> i64 {
+    return anom_run(s, digest, len, out);
+}
+pub fn fuai_anom_total(s: ptr) -> u64 { return anom_total(s); }
+pub fn fuai_anom_pending(s: ptr) -> u64 { return anom_pending(s); }
+pub fn fuai_plan_run(s: ptr, goal: ptr, len: u32, out: ptr) -> i64 {
+    return plan_run(s, goal, len, out);
+}
+pub fn fuai_io_predict(s: ptr, seq: ptr, len: u32, out: ptr) -> i64 {
+    return io_predict(s, seq, len, out);
+}
+pub fn fuai_nlc_set(s: ptr, text: ptr, len: u32, out: ptr) -> i64 {
+    return nlc_set(s, text, len, out);
+}
+pub fn fuai_env_scan(s: ptr, out: ptr) -> i64 { return env_scan(s, out); }
+pub fn fuai_inv_run(s: ptr, out: ptr) -> i64 { return inv_run(s, out); }
+pub fn fuai_r3_probe(s: ptr, mode: u64, out: ptr) -> i64 {
+    return r3_probe(s, mode, out);
+}
+pub fn fuai_rules_load(s: ptr, buf: ptr, len: u32) -> i64 {
+    return rules_load(s, buf, len);
+}
+pub fn fuai_ai_stats(s: ptr, out: ptr) { ai_stats(s, out); }
+pub fn fuai_ai_audit(s: ptr, out: ptr, cap: u64) -> i64 {
+    return ai_export88(s, out, cap);
+}
+pub fn fuai_unified_aud(s: ptr, out: ptr, cap: u64) -> i64 {
+    return unified_aud(s, out, cap);
+}
+pub fn fuai_qual_feed(s: ptr, duty: u64, hit: u64) -> i64 {
+    return qual_feed(s, duty, hit);
+}
+pub fn fuai_qual_seq(s: ptr, out: ptr, n: u64) -> i64 { return qual_seq(s, out, n); }
+pub fn fuai_dom_admit(s: ptr, duty: u64, out: ptr) -> i64 {
+    return dom_admit(s, duty, out);
+}
+pub fn fuai_task_state(s: ptr, id: u64) -> u64 { return task_state(s, id); }
+pub fn fuai_task_spawn(s: ptr, payload_id: u32) -> i64 {
+    return task_spawn(s, payload_id);
+}
+pub fn fuai_task_bind_domain(s: ptr, task_id: u64, dom_id: u64) -> i64 {
+    return task_bind_domain(s, task_id, dom_id);
+}

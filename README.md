@@ -76,6 +76,16 @@ The product is a **freestanding static ELF** (`readelf -l` shows no
 The two optional adapters are ordinary dynamic binaries and are built on the
 target distribution.
 
+## Verified
+
+- **Debian GNU/Linux 13 (trixie) x86-64**: built from source with the Loment
+  reference toolchain and run natively — **14/14 PASS**, optional `l11b_shim`
+  PASS.
+- Ubuntu 26.04 x86-64 (WSL): 14/14 PASS.
+
+The supervisor binaries are statically linked (`readelf -l` shows no
+`INTERP`), so no glibc is involved on the FUAI side.
+
 ## Honest boundaries
 
 - **The supervisor state is explicit.** Loment has no module-level mutable
